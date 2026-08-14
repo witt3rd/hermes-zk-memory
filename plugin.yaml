@@ -1,0 +1,9 @@
+name: zk-memory
+version: 0.1.0
+description: "Zettelkasten-backed memory provider — atomic notes, LLM-judged retain, full-text recall."
+requirements: []
+hooks:
+  - initialize
+  - prefetch
+  - sync_turn
+  - shutdown
