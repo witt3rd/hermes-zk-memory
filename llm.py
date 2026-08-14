@@ -1,13 +1,25 @@
 """LLM access for sync_turn's write-time judgment.
 
-Routes through hermes-agent's own auxiliary-task machinery
-(agent.auxiliary_client), registered as the plugin-owned auxiliary task
-"zk_memory_judge" (see register() in __init__.py). This is the
-hermes-native way for an in-process plugin to get a provider/model
-users can pin independently of their main chat model — the same
-machinery hermes-observational-memory uses via call_llm(task=...), but
-routed through resolve_provider_client() directly because call_llm has
-no tool_choice / forced-tool-call support.
+Two forced-tool-calls per candidate-bearing turn, both routed through
+hermes-agent's own auxiliary-task machinery (agent.auxiliary_client),
+under the plugin-owned auxiliary task "zk_memory_judge" (registered in
+__init__.py's register()):
+
+  1. distill_turn — sees the raw turn only, no corpus visibility. Splits
+     it into zero or more candidates, each tagged:
+       - "concept": a self-contained evergreen idea — a new node.
+       - "entity_update": a temporal/attribute-level fact (e.g. "Judy
+         arriving in two weeks") that would be a useless orphan as its
+         own note — it belongs appended to an existing entity note.
+     Both kinds flow through the same merge-or-create decision below;
+     the kind only shapes what gets drafted.
+
+  2. judge_merge — one call per candidate, given the full body of every
+     zk_search hit for that candidate's topic (fetched, not just
+     snippets). Decides: does this belong in one of these existing
+     notes (merge), or is it genuinely new (create)? One call compares
+     across all hits at once rather than one call per hit — cheaper and
+     lets the model reason comparatively.
 
 Deliberately NOT ctx.llm: memory-provider plugins never receive a real
 PluginContext (register() only forwards register_* calls — see
@@ -16,8 +28,7 @@ unreachable from this plugin category regardless of preference.
 
 Import of agent.auxiliary_client is lazy and guarded so this module
 stays importable (and unit-testable) outside a hermes-agent install —
-_resolve_client() and judge_turn() degrade to (None, None) / None
-rather than raising.
+every public function degrades to None/[] rather than raising.
 """
 
 from __future__ import annotations
@@ -30,45 +41,186 @@ logger = logging.getLogger(__name__)
 
 TASK_KEY = "zk_memory_judge"
 
-_JUDGE_TOOL: dict[str, Any] = {
+# Default routing for the auxiliary task (register_auxiliary_task
+# defaults — see __init__.py). Explicit rather than "auto": this call
+# fires on every non-trivial turn, so leaving it to auto-detection risks
+# silently resolving to an expensive frontier model for what's usually a
+# short yes/no + draft. claude-sonnet-5 is the cheapest Anthropic model
+# with a 1M-context option, which matters here: distill_turn sees the
+# full raw turn (a large paste, long tool output) with no truncation
+# below the hard safety cap. Deployments that expect large turns as a
+# matter of course should point auxiliary.zk_memory_judge.model at
+# their platform's 1M-context variant explicitly — the exact model-id
+# syntax for that is provider/deployment-specific, so it's not baked in
+# here as a literal default.
+_DEFAULT_PROVIDER = "anthropic"
+_DEFAULT_MODEL = "claude-sonnet-5"
+
+# Hard safety cap only — NOT a normal-path truncation. At 1M context,
+# ordinary turns never hit this; it exists solely so a pathological
+# paste can't blow past provider limits or balloon cost unbounded.
+_CHARS_PER_TOKEN = 4
+_MAX_INPUT_TOKENS = 900_000
+
+
+def _truncate_to_max_tokens(text: str, max_tokens: int) -> str:
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 — distill
+# ---------------------------------------------------------------------------
+
+_DISTILL_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "record_retain",
+        "name": "record_candidates",
         "description": (
-            "Decide whether this turn is worth a permanent note in the "
-            "zettelkasten, and if so, draft it. Always call this tool "
+            "Record zero or more retain candidates extracted from this "
+            "turn. Always call this tool exactly once per invocation."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["worth_retaining", "candidates"],
+            "properties": {
+                "worth_retaining": {
+                    "type": "boolean",
+                    "description": "True if this turn contains anything worth retaining.",
+                },
+                "candidates": {
+                    "type": "array",
+                    "description": (
+                        "MUST be empty when worth_retaining is false; MUST "
+                        "contain at least one entry when true."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["kind", "topic", "title", "slug", "content"],
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["concept", "entity_update"],
+                                "description": (
+                                    "'concept': a self-contained evergreen "
+                                    "idea, substantial enough to stand alone "
+                                    "as a new node. 'entity_update': a "
+                                    "temporal or attribute-level fact about "
+                                    "an existing entity/topic — would be a "
+                                    "useless orphan as its own note."
+                                ),
+                            },
+                            "topic": {
+                                "type": "string",
+                                "description": (
+                                    "What this is about, in a few words — "
+                                    "used to search the corpus for a "
+                                    "possible existing home (e.g. an entity "
+                                    "name, a project, a recurring theme)."
+                                ),
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Title to use IF this becomes a new note.",
+                            },
+                            "slug": {
+                                "type": "string",
+                                "description": "Short hyphenated slug to use IF this becomes a new note (no date prefix).",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": (
+                                    "For 'concept': the full atomic thought, "
+                                    "own words, one idea. For "
+                                    "'entity_update': just the fact/update "
+                                    "fragment, own words, not a transcript."
+                                ),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+_DISTILL_SYSTEM_PROMPT = """You are the write-time distiller for a zettelkasten memory. \
+Given one conversational turn, extract zero or more retain candidates.
+
+There are two very different kinds of output, and conflating them ruins the \
+corpus:
+
+- CONCEPT: a self-contained, evergreen idea. It has enough conceptual weight \
+to stand entirely on its own as a new node, ready to be linked to other \
+ideas.
+- ENTITY_UPDATE: a temporal or attribute-level data point (e.g. "Judy \
+arriving in two weeks"). If made its own standalone note, it would be a \
+useless orphan. It belongs appended to an existing entity/topic note \
+instead.
+
+Most turns yield nothing: routine questions, small talk, tool mechanics, and \
+anything already obvious from context are not worth retaining at all — \
+worth_retaining=false, empty candidates.
+
+When something IS worth retaining, draft each candidate's content in your \
+own words — never a transcript excerpt."""
+
+
+def distill_turn(user_content: str, assistant_content: str) -> list[dict[str, Any]]:
+    """Run the write-time distillation call. Returns a (possibly empty)
+    list of candidate dicts. Never raises.
+    """
+    client, model = _resolve_client()
+    if client is None:
+        return []
+    turn_text = _truncate_to_max_tokens(
+        f"USER: {user_content}\n\nASSISTANT: {assistant_content}",
+        _MAX_INPUT_TOKENS,
+    )
+    parsed = _forced_tool_call(
+        client, model, _DISTILL_SYSTEM_PROMPT, turn_text, _DISTILL_TOOL, "record_candidates"
+    )
+    if not parsed or not parsed.get("worth_retaining"):
+        return []
+    candidates = parsed.get("candidates") or []
+    return [c for c in candidates if isinstance(c, dict)]
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — judge merge vs. create (one call per candidate, all hits at once)
+# ---------------------------------------------------------------------------
+
+_MERGE_JUDGE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "record_merge_decision",
+        "description": (
+            "Decide whether new information belongs in one of the given "
+            "existing notes, or is genuinely new. Always call this tool "
             "exactly once."
         ),
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["worth_retaining"],
+            "required": ["action"],
             "properties": {
-                "worth_retaining": {
-                    "type": "boolean",
+                "action": {
+                    "type": "string",
+                    "enum": ["merge", "create"],
                     "description": (
-                        "True if this turn contains a durable fact, "
-                        "decision, preference, or distinction worth "
-                        "recalling later. False for small talk, routine "
-                        "tool mechanics, or anything already obvious from "
-                        "context."
+                        "'merge' if one of the existing notes is the right "
+                        "home for this information; 'create' if none is."
                     ),
                 },
-                "slug": {
-                    "type": "string",
-                    "description": "Short hyphenated slug (no date prefix). Required when worth_retaining is true.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Human title for the note. Required when worth_retaining is true.",
-                },
-                "body": {
+                "merge_target_ref": {
                     "type": "string",
                     "description": (
-                        "ONE atomic thought, in your own words, not a "
-                        "transcript. Link related notes with "
-                        "[label](slug.md). Required when worth_retaining "
-                        "is true."
+                        "The uuid of the existing note to merge into. "
+                        "Required when action is 'merge'; omit otherwise."
                     ),
                 },
             },
@@ -76,18 +228,46 @@ _JUDGE_TOOL: dict[str, Any] = {
     },
 }
 
-_SYSTEM_PROMPT = """You are the write-time judge for a zettelkasten memory. \
-Given one conversational turn, decide whether it contains something worth \
-a permanent, atomic note — a durable fact, decision, preference, or \
-distinction that would be useful to recall in a future conversation.
+_MERGE_JUDGE_SYSTEM_PROMPT = """You are the merge judge for a zettelkasten memory. \
+Given a piece of new information and a short list of existing notes, decide \
+whether the new information belongs appended to one of those existing \
+notes, or whether it's genuinely new and deserves its own note.
 
-Most turns are NOT worth a note: routine questions, small talk, tool \
-mechanics, and anything that's just restating what's already obvious from \
-context should be worth_retaining=false with no other fields.
+Merge only when the existing note is truly the same entity/topic — not \
+merely related. When in doubt, prefer 'create': a wrong merge pollutes an \
+existing note; a missed merge just means slight duplication, which is the \
+safer failure."""
 
-When something IS worth retaining, draft ONE atomic note: your own words, \
-not a transcript excerpt. One thought per note."""
 
+def judge_merge(candidate: dict[str, Any], hit_notes: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Run the merge-vs-create judgment for one candidate against its
+    fetched search hits. Returns the parsed decision dict, or None on
+    any failure (callers should treat None as "create"). Never raises.
+    """
+    if not hit_notes:
+        return None
+    client, model = _resolve_client()
+    if client is None:
+        return None
+
+    notes_text = "\n\n".join(
+        f"[{n.get('uuid', '')}] {n.get('title', n.get('slug', '?'))}\n{n.get('body', '').strip()}"
+        for n in hit_notes
+    )
+    kind = candidate.get("kind", "concept")
+    content = candidate.get("content", "")
+    user_text = (
+        f"New information (kind={kind}):\n{content}\n\n"
+        f"Existing notes found for this topic:\n{notes_text}"
+    )
+    return _forced_tool_call(
+        client, model, _MERGE_JUDGE_SYSTEM_PROMPT, user_text, _MERGE_JUDGE_TOOL, "record_merge_decision"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared LLM plumbing
+# ---------------------------------------------------------------------------
 
 def _resolve_client():
     """Return (client, model) via the plugin's own auxiliary task, or
@@ -114,24 +294,26 @@ def _resolve_client():
         return None, None
 
 
-def judge_turn(user_content: str, assistant_content: str) -> Optional[dict[str, Any]]:
-    """Run the write-time judgment call. Returns the parsed tool-call
-    arguments dict, or None on any failure. NEVER raises.
-    """
-    client, model = _resolve_client()
-    if client is None:
-        return None
-    turn_text = f"USER: {user_content}\n\nASSISTANT: {assistant_content}"
+def _forced_tool_call(
+    client: Any,
+    model: Any,
+    system_prompt: str,
+    user_text: str,
+    tool: dict[str, Any],
+    tool_name: str,
+) -> Optional[dict[str, Any]]:
+    """One forced-tool-call completion; returns the parsed arguments
+    dict, or None on any failure. Never raises."""
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": turn_text},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text},
             ],
-            tools=[_JUDGE_TOOL],
+            tools=[tool],
             tool_choice="required",
-            max_tokens=1000,
+            max_tokens=1500,
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or (
@@ -149,5 +331,5 @@ def judge_turn(user_content: str, assistant_content: str) -> Optional[dict[str, 
             return None
         return json.loads(args_raw)
     except Exception:
-        logger.warning("zk-memory: judge_turn call failed", exc_info=True)
+        logger.warning("zk-memory: %s call failed", tool_name, exc_info=True)
         return None

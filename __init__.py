@@ -234,12 +234,21 @@ class ZkMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Auto-retain: off-thread, one forced-tool-call LLM judgment on
-        (user_content, assistant_content) deciding whether the turn is
-        worth a zettel, and if so drafting {slug, title, body} — written
-        via the same zk.write() the zk_write tool uses. No queue, no
-        batching, no second (integrator) pass: extraction and
-        integration collapse into this single call.
+        """Auto-retain: off-thread, two-stage LLM judgment.
+
+        1. distill_turn — no corpus visibility — splits the turn into
+           zero or more candidates, each a "concept" (self-contained new
+           node) or an "entity_update" (a fact fragment that belongs on
+           an existing note, not standalone).
+        2. Per candidate: zk.search() its topic (no LLM). If there are
+           hits, judge_merge() compares the candidate against ALL fetched
+           hit bodies in one call and decides merge-into-existing vs.
+           create-new. No hits -> straight to create, no LLM call spent.
+        3. Write: zk.merge() (append-only) or zk.write() (new note).
+
+        No queue, no batching, no second cron-scheduled pass: everything
+        the old extractor+integrator pipeline did collapses into this
+        one off-thread run per turn.
 
         Fires on a daemon thread and returns immediately; any prior
         in-flight sync is bounded-joined first so writes stay ordered.
@@ -249,20 +258,9 @@ class ZkMemoryProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                verdict = _llm.judge_turn(user_content, assistant_content)
-                if not verdict or not verdict.get("worth_retaining"):
-                    return
-                slug = (verdict.get("slug") or "").strip()
-                title = (verdict.get("title") or "").strip()
-                body = (verdict.get("body") or "").strip()
-                if not slug or not title or not body:
-                    logger.warning(
-                        "zk-memory: worth_retaining=true but slug/title/body incomplete"
-                    )
-                    return
-                result = zk.write(slug, title, body, self._root)
-                if not result.get("ok"):
-                    logger.warning("zk-memory: sync_turn write failed: %s", result.get("err"))
+                candidates = _llm.distill_turn(user_content, assistant_content)
+                for candidate in candidates:
+                    self._process_candidate(candidate)
             except Exception:
                 logger.warning("zk-memory: sync_turn failed", exc_info=True)
 
@@ -271,13 +269,67 @@ class ZkMemoryProvider(MemoryProvider):
         self._sync_thread = threading.Thread(target=_run, daemon=True, name="zk-memory-sync")
         self._sync_thread.start()
 
+    def _process_candidate(self, candidate: Dict[str, Any]) -> None:
+        """Route one distilled candidate: merge into an existing note if
+        the merge judge picks one of the search hits, otherwise create a
+        new note. Never raises — failures are logged and skipped so one
+        bad candidate doesn't drop the rest of the turn's candidates.
+        """
+        try:
+            topic = (candidate.get("topic") or candidate.get("title") or "").strip()
+            hits = zk.search(topic, self._root, limit=3) if topic else []
+
+            target_ref = None
+            if hits:
+                notes = []
+                for h in hits:
+                    ref = h.get("uuid") or h.get("slug")
+                    if not ref:
+                        continue
+                    result = zk.read(ref, self._root, resolve_links=False)
+                    if result["found"]:
+                        notes.append(result["note"])
+                if notes:
+                    decision = _llm.judge_merge(candidate, notes)
+                    if decision and decision.get("action") == "merge":
+                        candidate_ref = (decision.get("merge_target_ref") or "").strip()
+                        valid_refs = {n.get("uuid") for n in notes if n.get("uuid")}
+                        if candidate_ref and candidate_ref in valid_refs:
+                            target_ref = candidate_ref
+                        elif candidate_ref:
+                            logger.warning(
+                                "zk-memory: merge_target_ref %r not among fetched hits; falling back to create",
+                                candidate_ref,
+                            )
+
+            if target_ref:
+                content = (candidate.get("content") or "").strip()
+                if not content:
+                    return
+                result = zk.merge(target_ref, content, self._root)
+                if not result.get("ok"):
+                    logger.warning("zk-memory: merge failed: %s", result.get("err"))
+                return
+
+            slug = (candidate.get("slug") or "").strip()
+            title = (candidate.get("title") or "").strip()
+            content = (candidate.get("content") or "").strip()
+            if not slug or not title or not content:
+                logger.warning("zk-memory: candidate incomplete (slug/title/content); skipping")
+                return
+            result = zk.write(slug, title, content, self._root)
+            if not result.get("ok"):
+                logger.warning("zk-memory: create failed: %s", result.get("err"))
+        except Exception:
+            logger.warning("zk-memory: candidate processing failed", exc_info=True)
+
 
 def register(ctx) -> None:
     """Called by Hermes memory plugin discovery."""
     ctx.register_auxiliary_task(
         key=_llm.TASK_KEY,
         display_name="ZK memory write-time judge",
-        description="Judges whether a turn deserves a zettel, and drafts it.",
-        defaults={"provider": "auto", "model": ""},
+        description="Distills turns into zettel candidates and judges merge-vs-create.",
+        defaults={"provider": _llm._DEFAULT_PROVIDER, "model": _llm._DEFAULT_MODEL},
     )
     ctx.register_memory_provider(ZkMemoryProvider())

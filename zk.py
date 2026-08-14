@@ -21,6 +21,8 @@ through.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import re
 import shutil
 import subprocess
@@ -235,6 +237,49 @@ def write(slug: str, title: str, body: str, root: Path) -> dict[str, Any]:
         fpath.write_text(front + content_txt, encoding="utf-8")
 
     return {"ok": True, "path": str(fpath), "uuid": uuid}
+
+
+# ---------------------------------------------------------------------------
+# Merge — append a fragment to an EXISTING note (never rewrite/replace)
+# ---------------------------------------------------------------------------
+
+def merge(ref: str, fragment: str, root: Path) -> dict[str, Any]:
+    """Append a dated fragment to an existing note.
+
+    This is the one true read-modify-write on the corpus, and the one
+    place a lock matters: ``write()`` is collision-safe by refusing to
+    overwrite (no read-before-write), but appending to an existing file
+    needs to keep two concurrent callers (two sync_turn threads, or a
+    volitional zk_write racing an automatic retain) from interleaving.
+    A corpus-wide flock is coarser than a per-note lock but simpler and
+    plenty for this call frequency.
+
+    Append-only by design: never rewrites existing prose, so a bad
+    merge can at worst add a wrong fragment, never destroy content.
+    Returns {ok, path, err}.
+    """
+    import datetime as _dt
+
+    note = find_note(ref, root)
+    if not note:
+        return {"ok": False, "path": "", "err": f"note not found: {ref}"}
+    fpath = root / note["path"]
+
+    lock_path = root / ".zk.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        today = _dt.date.today().isoformat()
+        addition = f"\n\n---\n*{today}:* {fragment.strip()}\n"
+        try:
+            with open(fpath, "a", encoding="utf-8") as f:
+                f.write(addition)
+        except OSError as e:
+            return {"ok": False, "path": str(fpath), "err": str(e)}
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    return {"ok": True, "path": str(fpath)}
 
 
 # ---------------------------------------------------------------------------
