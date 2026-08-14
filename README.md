@@ -49,6 +49,38 @@ The distill call sees the full raw turn with no normal-path truncation (only
 a very large hard safety cap) — this is why the auxiliary task defaults to a
 1M-context model. See `llm.py` for the full rationale.
 
+### `on_pre_compress`: promoting what compaction is about to drop
+
+Hermes calls `MemoryProvider.on_pre_compress(messages)` immediately before
+context compaction discards a batch of messages. This runs the same
+distill-then-merge-or-create judgment as `sync_turn`, scoped to exactly that
+batch, **synchronously** (the caller needs the return value before
+compaction proceeds) — so compaction gets a targeted chance to promote
+what it's about to drop, on top of whatever `sync_turn`'s per-turn cadence
+already caught.
+
+## Diagnostics
+
+Every module logs failures via the standard `logging` module (`logger.warning`,
+usually with a traceback). For the success path — what actually happened, not
+just what broke — every retain/recall decision also calls `probe.trace(event,
+root, **fields)`, which:
+
+- always logs at INFO (`zk-memory trace: <event> {...fields}`)
+- appends one JSON line to `$HERMES_HOME/.zk-memory-trace.jsonl` (sibling to
+  the corpus, same convention as the LanceDB index cache — derived/diagnostic
+  artifacts live beside `zk/`, never inside it)
+
+Traced events: `registered`, `initialized`, `shutdown`, `tool_call` (every
+`zk_search`/`zk_read`/`zk_write`/`zk_tend` invocation), `prefetch` (query +
+hit count), `sync_turn_distilled` (candidate count), `candidate_decision`
+(merge vs. create vs. skipped, per candidate), `pre_compress` (message +
+candidate counts). Tail the trace file to watch retention decisions live:
+
+```bash
+tail -f "$HERMES_HOME/.zk-memory-trace.jsonl" | jq .
+```
+
 ## Install
 
 ```bash

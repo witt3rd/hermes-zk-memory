@@ -24,6 +24,7 @@ from agent.memory_provider import MemoryProvider
 
 import zk
 import llm as _llm
+from probe import trace as _trace
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,13 @@ class ZkMemoryProvider(MemoryProvider):
         if not hermes_home:
             raise RuntimeError("HERMES_HOME not provided; cannot resolve corpus root")
         self._root = Path(hermes_home) / "zk"
+        _trace("initialized", self._root, session_id=session_id)
 
     def shutdown(self) -> None:
         t = self._sync_thread
         if t is not None and t.is_alive():
             t.join(timeout=5.0)
+        _trace("shutdown", self._root)
 
     # ---- volitional tool surface -------------------------------------
     #
@@ -143,16 +146,21 @@ class ZkMemoryProvider(MemoryProvider):
         args = args or {}
         try:
             if tool_name == "zk_search":
-                return self._search_text(args.get("query", ""), int(args.get("limit", 8)))
-            if tool_name == "zk_read":
-                return self._read_text(args.get("ref", ""))
-            if tool_name == "zk_write":
-                return self._write_text(args.get("slug", ""), args.get("title", ""), args.get("body", ""))
-            if tool_name == "zk_tend":
-                return self._tend_text(args.get("action", ""))
-            return f"error: unknown tool: {tool_name}"
+                result = self._search_text(args.get("query", ""), int(args.get("limit", 8)))
+            elif tool_name == "zk_read":
+                result = self._read_text(args.get("ref", ""))
+            elif tool_name == "zk_write":
+                result = self._write_text(args.get("slug", ""), args.get("title", ""), args.get("body", ""))
+            elif tool_name == "zk_tend":
+                result = self._tend_text(args.get("action", ""))
+            else:
+                _trace("tool_call", self._root, tool=tool_name, ok=False, reason="unknown_tool")
+                return f"error: unknown tool: {tool_name}"
+            _trace("tool_call", self._root, tool=tool_name, ok=not result.startswith("error"))
+            return result
         except Exception as e:
             logger.warning("zk-memory tool %s failed: %s", tool_name, e)
+            _trace("tool_call", self._root, tool=tool_name, ok=False, error=str(e))
             return f"error: {e}"
 
     def _search_text(self, query: str, limit: int) -> str:
@@ -219,7 +227,9 @@ class ZkMemoryProvider(MemoryProvider):
             hits = zk.search(query, self._root, limit=5)
         except Exception as e:
             logger.warning("zk-memory prefetch failed: %s", e)
+            _trace("prefetch", self._root, query=query, ok=False, error=str(e))
             return ""
+        _trace("prefetch", self._root, query=query, ok=True, hits=len(hits))
         if not hits:
             return ""
         lines = [f'<recall query="{query}">']
@@ -259,10 +269,17 @@ class ZkMemoryProvider(MemoryProvider):
         def _run() -> None:
             try:
                 candidates = _llm.distill_turn(user_content, assistant_content)
+                _trace(
+                    "sync_turn_distilled",
+                    self._root,
+                    session_id=session_id,
+                    n_candidates=len(candidates),
+                )
                 for candidate in candidates:
                     self._process_candidate(candidate)
             except Exception:
                 logger.warning("zk-memory: sync_turn failed", exc_info=True)
+                _trace("sync_turn_failed", self._root, session_id=session_id)
 
         if self._sync_thread is not None and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
@@ -302,13 +319,24 @@ class ZkMemoryProvider(MemoryProvider):
                                 candidate_ref,
                             )
 
+            kind = candidate.get("kind", "")
+
             if target_ref:
                 content = (candidate.get("content") or "").strip()
                 if not content:
+                    _trace(
+                        "candidate_decision", self._root, kind=kind, topic=topic,
+                        action="merge_skipped_empty_content", target=target_ref,
+                    )
                     return
                 result = zk.merge(target_ref, content, self._root)
                 if not result.get("ok"):
                     logger.warning("zk-memory: merge failed: %s", result.get("err"))
+                _trace(
+                    "candidate_decision", self._root, kind=kind, topic=topic,
+                    action="merge", target=target_ref, ok=result.get("ok"),
+                    err=result.get("err"),
+                )
                 return
 
             slug = (candidate.get("slug") or "").strip()
@@ -316,12 +344,21 @@ class ZkMemoryProvider(MemoryProvider):
             content = (candidate.get("content") or "").strip()
             if not slug or not title or not content:
                 logger.warning("zk-memory: candidate incomplete (slug/title/content); skipping")
+                _trace(
+                    "candidate_decision", self._root, kind=kind, topic=topic,
+                    action="create_skipped_incomplete",
+                )
                 return
             result = zk.write(slug, title, content, self._root)
             if not result.get("ok"):
                 logger.warning("zk-memory: create failed: %s", result.get("err"))
+            _trace(
+                "candidate_decision", self._root, kind=kind, topic=topic,
+                action="create", slug=slug, ok=result.get("ok"), err=result.get("err"),
+            )
         except Exception:
             logger.warning("zk-memory: candidate processing failed", exc_info=True)
+            _trace("candidate_decision", self._root, action="failed")
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Called by hermes immediately before context compression
@@ -368,6 +405,10 @@ class ZkMemoryProvider(MemoryProvider):
                 label = (candidate.get("title") or candidate.get("topic") or "").strip()
                 if label:
                     titles.append(label)
+            _trace(
+                "pre_compress", self._root, n_messages=len(messages),
+                n_candidates=len(candidates),
+            )
             if not titles:
                 return ""
             return (
@@ -376,6 +417,7 @@ class ZkMemoryProvider(MemoryProvider):
             )
         except Exception:
             logger.warning("zk-memory: on_pre_compress failed", exc_info=True)
+            _trace("pre_compress_failed", self._root, n_messages=len(messages))
             return ""
 
 
@@ -388,3 +430,6 @@ def register(ctx) -> None:
         defaults={"provider": _llm._DEFAULT_PROVIDER, "model": _llm._DEFAULT_MODEL},
     )
     ctx.register_memory_provider(ZkMemoryProvider())
+    # No corpus root yet at register() time (that's resolved per-session in
+    # initialize()) -- log-only, no trace file write.
+    _trace("registered", None, task_key=_llm.TASK_KEY)
