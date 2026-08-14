@@ -149,7 +149,8 @@ _DISTILL_TOOL: dict[str, Any] = {
 }
 
 _DISTILL_SYSTEM_PROMPT = """You are the write-time distiller for a zettelkasten memory. \
-Given one conversational turn, extract zero or more retain candidates.
+Given a piece of conversation (a single turn, or a longer excerpt about to \
+be dropped by context compaction), extract zero or more retain candidates.
 
 There are two very different kinds of output, and conflating them ruins the \
 corpus:
@@ -170,24 +171,50 @@ When something IS worth retaining, draft each candidate's content in your \
 own words — never a transcript excerpt."""
 
 
-def distill_turn(user_content: str, assistant_content: str) -> list[dict[str, Any]]:
-    """Run the write-time distillation call. Returns a (possibly empty)
-    list of candidate dicts. Never raises.
-    """
+def _distill_text(text: str) -> list[dict[str, Any]]:
+    """Shared distillation call over an already-built transcript string."""
     client, model = _resolve_client()
     if client is None:
         return []
-    turn_text = _truncate_to_max_tokens(
-        f"USER: {user_content}\n\nASSISTANT: {assistant_content}",
-        _MAX_INPUT_TOKENS,
-    )
+    text = _truncate_to_max_tokens(text, _MAX_INPUT_TOKENS)
     parsed = _forced_tool_call(
-        client, model, _DISTILL_SYSTEM_PROMPT, turn_text, _DISTILL_TOOL, "record_candidates"
+        client, model, _DISTILL_SYSTEM_PROMPT, text, _DISTILL_TOOL, "record_candidates"
     )
     if not parsed or not parsed.get("worth_retaining"):
         return []
     candidates = parsed.get("candidates") or []
     return [c for c in candidates if isinstance(c, dict)]
+
+
+def distill_turn(user_content: str, assistant_content: str) -> list[dict[str, Any]]:
+    """Run the write-time distillation call over one turn. Returns a
+    (possibly empty) list of candidate dicts. Never raises.
+    """
+    return _distill_text(f"USER: {user_content}\n\nASSISTANT: {assistant_content}")
+
+
+def distill_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run the write-time distillation call over a batch of messages —
+    the shape hermes hands ``MemoryProvider.on_pre_compress`` (the
+    turns about to be dropped by context compaction), as opposed to
+    ``distill_turn``'s single (user, assistant) pair.
+
+    System messages are skipped (already protected/not being dropped).
+    Never raises; returns [] on any failure or if there's nothing to
+    distill from.
+    """
+    lines = []
+    for m in messages:
+        role = (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) or ""
+        if role == "system":
+            continue
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if not content or not isinstance(content, str):
+            continue
+        lines.append(f"{role.upper()}: {content}")
+    if not lines:
+        return []
+    return _distill_text("\n\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

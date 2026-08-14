@@ -255,3 +255,53 @@ def test_resolve_client_returns_client_and_model_on_success(llm_module, monkeypa
     client, model = llm_module._resolve_client()
     assert client is sentinel_client
     assert model == "gpt-test"
+
+
+# ---------------------------------------------------------------------------
+# distill_messages -- the on_pre_compress entry point (batch, not a single turn)
+# ---------------------------------------------------------------------------
+
+
+def test_distill_messages_returns_empty_for_no_messages(llm_module):
+    assert llm_module.distill_messages([]) == []
+
+
+def test_distill_messages_returns_empty_when_only_system_messages(llm_module, monkeypatch):
+    called = []
+    monkeypatch.setattr(llm_module, "_distill_text", lambda text: called.append(text) or [])
+    result = llm_module.distill_messages([{"role": "system", "content": "SOUL.md stuff"}])
+    assert result == []
+    assert called == []  # never even reaches the LLM call -- nothing to distill
+
+
+def test_distill_messages_excludes_system_and_non_string_content(llm_module, monkeypatch):
+    captured = {}
+
+    def _fake_distill_text(text):
+        captured["text"] = text
+        return []
+
+    monkeypatch.setattr(llm_module, "_distill_text", _fake_distill_text)
+    messages = [
+        {"role": "system", "content": "SECRET_SYSTEM_MARKER"},
+        {"role": "user", "content": "hello there"},
+        {"role": "assistant", "content": "hi back"},
+        {"role": "assistant", "content": [{"type": "tool_use"}]},  # non-string content, skipped
+        {"role": "tool", "content": None},  # falsy content, skipped
+    ]
+    llm_module.distill_messages(messages)
+
+    assert "SECRET_SYSTEM_MARKER" not in captured["text"]
+    assert "USER: hello there" in captured["text"]
+    assert "ASSISTANT: hi back" in captured["text"]
+
+
+def test_distill_messages_delegates_to_distill_text(llm_module, monkeypatch):
+    payload = {"worth_retaining": True, "candidates": [{"kind": "concept"}]}
+    response = _fake_response_object_style(json.dumps(payload))
+    client = _FakeClient(response)
+    monkeypatch.setattr(llm_module, "_resolve_client", lambda: (client, "m"))
+
+    messages = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}]
+    result = llm_module.distill_messages(messages)
+    assert result == [{"kind": "concept"}]

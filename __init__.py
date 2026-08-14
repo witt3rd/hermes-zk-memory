@@ -323,6 +323,61 @@ class ZkMemoryProvider(MemoryProvider):
         except Exception:
             logger.warning("zk-memory: candidate processing failed", exc_info=True)
 
+    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        """Called by hermes immediately before context compression
+        discards ``messages`` (the middle window about to be
+        summarized away).
+
+        Runs the same distill-then-merge-or-create judgment sync_turn
+        uses (via _llm.distill_messages / self._process_candidate),
+        scoped to exactly this about-to-be-dropped batch. This closes
+        the gap docs/memory.md §6.8.2 flagged: without it, nothing
+        promotes what compaction is about to drop into the
+        zettelkasten specifically at the compaction boundary — retain
+        relied entirely on sync_turn's per-turn cadence already having
+        caught up, which a burst of turns racing sync_turn's
+        background thread could outrun.
+
+        Runs SYNCHRONOUSLY, unlike sync_turn: the caller needs the
+        return value before compress() proceeds, and this fires
+        rarely (once per compaction event), so the extra latency is
+        proportionate to the cost compaction already pays for its own
+        summarization call.
+
+        Known tradeoff: if sync_turn already processed these same
+        turns (the common case), this re-distills the same content —
+        the merge judge should usually recognize an already-written
+        near-duplicate and merge into it rather than create a new
+        note, but a redundant append is possible. Accepted as a rare,
+        benign cost rather than engineering de-duplication against
+        sync_turn's already-processed turns.
+
+        Returns a short receipt threaded into the compressor's summary
+        prompt (memory_context) — the retention itself already
+        happened as a side effect by the time this returns; the
+        receipt is a bonus hint for the summarizer, not the mechanism.
+        Never raises; returns "" on any failure or nothing to retain.
+        """
+        if self._root is None or not messages:
+            return ""
+        try:
+            candidates = _llm.distill_messages(messages)
+            titles = []
+            for candidate in candidates:
+                self._process_candidate(candidate)
+                label = (candidate.get("title") or candidate.get("topic") or "").strip()
+                if label:
+                    titles.append(label)
+            if not titles:
+                return ""
+            return (
+                "[zk-memory] Retained to the zettelkasten before this "
+                "compaction: " + ", ".join(titles)
+            )
+        except Exception:
+            logger.warning("zk-memory: on_pre_compress failed", exc_info=True)
+            return ""
+
 
 def register(ctx) -> None:
     """Called by Hermes memory plugin discovery."""
