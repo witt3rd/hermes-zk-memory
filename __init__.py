@@ -6,20 +6,24 @@ recall/retain motions (prefetch/sync_turn) — "auto" is an optional
 convenience over the same underlying corpus operations, not a parallel
 code path.
 
-sync_turn's write-time judgment (deciding whether a turn is worth a note,
-and drafting one) is not yet implemented — see the TODO on sync_turn.
+sync_turn's write-time judgment is one forced-tool-call LLM invocation
+(llm.judge_turn) routed through the plugin's own registered auxiliary
+task ("zk_memory_judge") — see llm.py for why this is the hermes-native
+mechanism (not ctx.llm, which memory-provider plugins can't reach).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 
 import zk
+import llm as _llm
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,7 @@ class ZkMemoryProvider(MemoryProvider):
 
     def __init__(self) -> None:
         self._root: Optional[Path] = None
+        self._sync_thread: Optional[threading.Thread] = None
 
     @property
     def name(self) -> str:
@@ -46,7 +51,9 @@ class ZkMemoryProvider(MemoryProvider):
         self._root = Path(hermes_home) / "zk"
 
     def shutdown(self) -> None:
-        pass
+        t = self._sync_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=5.0)
 
     # ---- volitional tool surface -------------------------------------
     #
@@ -227,18 +234,50 @@ class ZkMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Auto-retain: TODO.
-
-        Intended shape: off-thread, one forced-tool-call LLM judgment on
+        """Auto-retain: off-thread, one forced-tool-call LLM judgment on
         (user_content, assistant_content) deciding whether the turn is
         worth a zettel, and if so drafting {slug, title, body} — written
         via the same zk.write() the zk_write tool uses. No queue, no
         batching, no second (integrator) pass: extraction and
         integration collapse into this single call.
+
+        Fires on a daemon thread and returns immediately; any prior
+        in-flight sync is bounded-joined first so writes stay ordered.
         """
-        raise NotImplementedError
+        if self._root is None:
+            return
+
+        def _run() -> None:
+            try:
+                verdict = _llm.judge_turn(user_content, assistant_content)
+                if not verdict or not verdict.get("worth_retaining"):
+                    return
+                slug = (verdict.get("slug") or "").strip()
+                title = (verdict.get("title") or "").strip()
+                body = (verdict.get("body") or "").strip()
+                if not slug or not title or not body:
+                    logger.warning(
+                        "zk-memory: worth_retaining=true but slug/title/body incomplete"
+                    )
+                    return
+                result = zk.write(slug, title, body, self._root)
+                if not result.get("ok"):
+                    logger.warning("zk-memory: sync_turn write failed: %s", result.get("err"))
+            except Exception:
+                logger.warning("zk-memory: sync_turn failed", exc_info=True)
+
+        if self._sync_thread is not None and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+        self._sync_thread = threading.Thread(target=_run, daemon=True, name="zk-memory-sync")
+        self._sync_thread.start()
 
 
 def register(ctx) -> None:
     """Called by Hermes memory plugin discovery."""
+    ctx.register_auxiliary_task(
+        key=_llm.TASK_KEY,
+        display_name="ZK memory write-time judge",
+        description="Judges whether a turn deserves a zettel, and drafts it.",
+        defaults={"provider": "auto", "model": ""},
+    )
     ctx.register_memory_provider(ZkMemoryProvider())
