@@ -18,7 +18,10 @@ Repository = "https://github.com/witt3rd/hermes-zk-memory"
 Issues = "https://github.com/witt3rd/hermes-zk-memory/issues"
 
 [project.optional-dependencies]
+# Rich full-text recall. Official PyPI `lancedb` (not a fork). Optional:
+# search degrades to a `rg`-based fallback when this extra isn't installed.
+lancedb = ["lancedb>=0.15", "pyarrow>=14"]
 test = ["pytest>=7"]
 
 [tool.setuptools]
-py-modules = ["__init__"]
+py-modules = ["__init__", "zk", "lancedb_fts"]
