@@ -49,7 +49,18 @@ class ZkMemoryProvider(MemoryProvider):
         hermes_home = kwargs.get("hermes_home") or os.environ.get("HERMES_HOME")
         if not hermes_home:
             raise RuntimeError("HERMES_HOME not provided; cannot resolve corpus root")
+        # Default corpus root: HERMES_HOME/zk (backwards compatible).
+        # Being-plugin writes memory.zk_corpus_root to the profile's config.yaml
+        # during provisioning. If present, use that path instead.
         self._root = Path(hermes_home) / "zk"
+        try:
+            from hermes_cli.config import load_config_readonly
+            cfg = load_config_readonly()
+            zk_root_rel = (cfg.get("memory") or {}).get("zk_corpus_root")
+            if zk_root_rel:
+                self._root = Path(hermes_home) / zk_root_rel
+        except Exception:
+            pass  # fallback to default
         _trace("initialized", self._root, session_id=session_id)
 
     def shutdown(self) -> None:
