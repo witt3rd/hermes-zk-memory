@@ -35,4 +35,4 @@ test = ["pytest>=7"]
 testpaths = ["tests"]
 
 [tool.setuptools]
-py-modules = ["__init__", "llm"]
+packages = ["hermes_zk_memory"]

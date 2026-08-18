@@ -128,8 +128,8 @@ def _load_plugin_module():
     if module_name in sys.modules and getattr(sys.modules[module_name], "__file__", None):
         return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(
-        module_name, str(REPO_ROOT / "__init__.py"),
-        submodule_search_locations=[str(REPO_ROOT)],
+        module_name, str(REPO_ROOT / "hermes_zk_memory" / "__init__.py"),
+        submodule_search_locations=[str(REPO_ROOT / "hermes_zk_memory")],
     )
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
@@ -160,7 +160,7 @@ def corpus_module():
 @pytest.fixture(scope="session")
 def llm_module():
     """The plugin's Hermes StructuredLLM adapter module."""
-    import llm as llm_mod
+    from hermes_zk_memory import llm as llm_mod
     return llm_mod
 
 
