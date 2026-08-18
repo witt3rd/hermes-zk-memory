@@ -12,6 +12,10 @@ on this machine; otherwise we fall back to a minimal local stub package
 under ``tests/_agent_stub/`` so the suite still runs on a bare machine/CI
 with no hermes-agent install, no network, no docker, and no real LLM
 provider key.
+
+The plugin is a thin adapter over the sibling ``zk-memory`` library, so
+that checkout must be importable too — same pattern as hermes-prospecta
+putting ``prospecta`` on sys.path.
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STUB_AGENT_DIR = Path(__file__).resolve().parent / "_agent_stub"
+# The sibling zk-memory library. NOTE: the worktree lives under
+# hermes-zk-memory.wt/, so REPO_ROOT.parent is NOT the source parent —
+# hardcode the candidate like the hermes-agent candidates below.
+_SIBLING_ZK_MEMORY_CANDIDATES = [
+    Path("/home/dt/src/witt3rd/zk-memory"),
+]
 
 # Candidate real hermes-agent checkouts on this machine. NOTE: an older
 # sibling plugin's conftest.py hardcodes /home/dt/src/ext/hermes-agent,
@@ -68,8 +78,16 @@ def _ensure_agent_package_on_path() -> str:
 
 _AGENT_SOURCE = _ensure_agent_package_on_path()
 
+# The sibling zk-memory library must be importable: __init__.py does
+# ``from zk_memory import Memory`` (not a relative sibling import).
+for _candidate in _SIBLING_ZK_MEMORY_CANDIDATES:
+    if (_candidate / "zk_memory" / "__init__.py").is_file():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
+
 # Repo root must be on sys.path too: __init__.py does plain top-level
-# ``import zk`` / ``import llm as _llm``, not relative imports.
+# ``import llm as _llm``, not a relative import.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -99,13 +117,15 @@ def plugin_module():
 
 
 @pytest.fixture(scope="session")
-def zk_module():
-    import zk as zk_mod
-    return zk_mod
+def corpus_module():
+    """The sibling zk-memory corpus module (for linlink patching etc)."""
+    import zk_memory.corpus as corpus
+    return corpus
 
 
 @pytest.fixture(scope="session")
 def llm_module():
+    """The plugin's Hermes StructuredLLM adapter module."""
     import llm as llm_mod
     return llm_mod
 
@@ -163,24 +183,22 @@ def provider(plugin_module, hermes_home):
 
 
 @pytest.fixture(autouse=True)
-def _no_linlink_by_default(monkeypatch):
-    """Force zk.write()/zk.tend() down their no-linlink fallback path by
+def _no_linlink_by_default(monkeypatch, corpus_module):
+    """Force corpus.write()/tend() down their no-linlink fallback path by
     default, regardless of whether linlink happens to be installed on the
     machine running the tests. Tests that specifically want to exercise
     the "linlink present" branch install their own fake linlink and
-    monkeypatch zk.shutil.which again inside the test body, which takes
-    precedence over this default (both use the same per-test monkeypatch
-    fixture, and the later call wins)."""
-    import zk
-
-    # zk.shutil IS the real (shared) shutil module -- capture the
-    # original `which` before patching it, since patching in place would
-    # otherwise make the "real" fallback call itself recursively.
-    _real_which = zk.shutil.which
+    monkeypatch zk_memory.corpus.shutil.which again inside the test body,
+    which takes precedence over this default (both use the same per-test
+    monkeypatch fixture, and the later call wins)."""
+    # corpus_module.shutil IS the real (shared) shutil module -- capture
+    # the original `which` before patching it, since patching in place
+    # would otherwise make the "real" fallback call itself recursively.
+    _real_which = corpus_module.shutil.which
 
     def _which_no_linlink(name):
         if name == "linlink":
             return None
         return _real_which(name)
 
-    monkeypatch.setattr(zk.shutil, "which", _which_no_linlink)
+    monkeypatch.setattr(corpus_module.shutil, "which", _which_no_linlink)

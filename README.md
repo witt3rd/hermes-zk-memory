@@ -7,6 +7,15 @@ markdown links — rather than a raw transcript log. Judgment happens at
 **write time** (an LLM decides whether a turn is worth a note, and drafts it),
 not deferred entirely to recall-time ranking.
 
+This repo is a **thin adapter** over the host-agnostic
+[zk-memory](https://github.com/witt3rd/zk-memory) library (same shape as the
+`hermes-prospecta` / `prospecta` split). The corpus operations, the retain
+pipeline, and the write-time prompts/schemas all live in `zk-memory`; this
+plugin constructs `zk_memory.Memory`, implements its `StructuredLLM` protocol
+via the auxiliary-task forced-tool-call path (`llm.py`), and owns the
+Hermes-shaped surface (tool text, threading, root/config resolution, auxiliary
+task registration).
+
 ## Design
 
 The same operations serve both the volitional tool surface and the automatic
@@ -22,8 +31,9 @@ underlying corpus operations, not a separate code path:
 
 ### Auto-retain: distill, then merge-or-create
 
-`sync_turn` fires off-thread after each turn and runs a two-stage judgment —
-no queue, no batching, no separate cron-scheduled integration pass:
+`sync_turn` fires off-thread after each turn and runs the library's two-stage
+judgment (`zk_memory.retain.retain_turn`) — no queue, no batching, no separate
+cron-scheduled integration pass:
 
 1. **Distill** (one LLM call, sees only the raw turn) splits it into zero or
    more candidates, each tagged:
@@ -32,22 +42,16 @@ no queue, no batching, no separate cron-scheduled integration pass:
    - `entity_update` — a temporal or attribute-level fact (e.g. "Judy is
      arriving in two weeks") that would be a useless orphan as its own note;
      it belongs appended to an existing entity/topic note instead.
-2. **Merge-or-create**, per candidate: `zk_search` the candidate's topic (no
-   LLM). No hits → straight to `zk.write()`, no LLM call spent. One or more
-   hits → fetch their full bodies and make **one** comparison call across all
-   of them (`judge_merge`) deciding whether the new information belongs in an
+2. **Merge-or-create**, per candidate: search the candidate's topic (no
+   LLM). No hits → straight to create, no LLM call spent. One or more hits →
+   fetch their full bodies and make **one** comparison call across all of
+   them (`judge_merge`) deciding whether the new information belongs in an
    existing note or is genuinely new. A `merge_target_ref` that doesn't match
    one of the fetched hits is never trusted — falls back to create.
-3. **Write**: `zk.write()` (new note) or `zk.merge()` — **append-only**, never
-   a rewrite of existing prose, so a wrong merge can at worst add a
-   misplaced fragment, never destroy content. `zk.merge()` takes a
-   corpus-wide flock around the append so concurrent writers (two
-   `sync_turn` calls, or a volitional `zk_write` racing an automatic retain)
-   can't interleave.
-
-The distill call sees the full raw turn with no normal-path truncation (only
-a very large hard safety cap) — this is why the auxiliary task defaults to a
-1M-context model. See `llm.py` for the full rationale.
+3. **Write**: new note, or `merge` — **append-only**, never a rewrite of
+   existing prose, so a wrong merge can at worst add a misplaced fragment,
+   never destroy content. `merge` takes a corpus-wide flock around the append
+   so concurrent writers can't interleave.
 
 ### `on_pre_compress`: promoting what compaction is about to drop
 
@@ -55,16 +59,16 @@ Hermes calls `MemoryProvider.on_pre_compress(messages)` immediately before
 context compaction discards a batch of messages. This runs the same
 distill-then-merge-or-create judgment as `sync_turn`, scoped to exactly that
 batch, **synchronously** (the caller needs the return value before
-compaction proceeds) — so compaction gets a targeted chance to promote
-what it's about to drop, on top of whatever `sync_turn`'s per-turn cadence
-already caught.
+compaction proceeds) — so compaction gets a targeted chance to promote what
+it's about to drop, on top of whatever `sync_turn`'s per-turn cadence already
+caught.
 
 ## Diagnostics
 
 Every module logs failures via the standard `logging` module (`logger.warning`,
 usually with a traceback). For the success path — what actually happened, not
-just what broke — every retain/recall decision also calls `probe.trace(event,
-root, **fields)`, which:
+just what broke — every retain/recall decision calls `zk_memory.probe.trace`,
+which:
 
 - always logs at INFO (`zk-memory trace: <event> {...fields}`)
 - appends one JSON line to `$HERMES_HOME/.zk-memory-trace.jsonl` (sibling to
@@ -82,6 +86,17 @@ tail -f "$HERMES_HOME/.zk-memory-trace.jsonl" | jq .
 ```
 
 ## Install
+
+`zk-memory` is a runtime dependency (declared via `plugin.yaml`
+`pip_dependencies`). Install it in the Hermes env:
+
+```bash
+pip install 'zk-memory @ git+https://github.com/witt3rd/zk-memory.git'
+# optional rich recall:
+pip install 'zk-memory[lancedb] @ git+https://github.com/witt3rd/zk-memory.git'
+```
+
+Then symlink this plugin into the Hermes install:
 
 ```bash
 git clone https://github.com/witt3rd/hermes-zk-memory /path/to/hermes-zk-memory
