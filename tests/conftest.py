@@ -236,3 +236,22 @@ def _no_linlink_by_default(monkeypatch, corpus_module):
         return _real_which(name)
 
     monkeypatch.setattr(corpus_module.shutil, "which", _which_no_linlink)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_config(monkeypatch):
+    """Isolate tests from the live profile's config.
+
+    The adapter's ``initialize()`` calls ``load_config_readonly()`` which
+    reads the real profile's ``memory.zk_corpus_root`` — a production
+    provisioned value. Tests inject ``hermes_home`` pointing at a tmp_path
+    and assert root resolution against that, but the live config silently
+    overrides it. Patch to empty dict so every test resolves against its own
+    sandbox, never the live root. Tests that need specific config values
+    can override via their own ``monkeypatch.setattr``."""
+    try:
+        import hermes_cli.config
+        monkeypatch.setattr(hermes_cli.config, "load_config_readonly", lambda: {})
+    except ImportError:
+        # No hermes_cli available (standalone CI) — config isn't reachable anyway.
+        pass
