@@ -5,12 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-zk-memory"
 version = "0.1.0"
-description = "Zettelkasten-backed memory provider for Hermes Agent — one atomic note per thought, judged at write time, recalled by search."
+description = "Zettelkasten-backed memory provider for Hermes Agent — thin adapter over the host-agnostic zk-memory library."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Forge ⚒️ & Donald", email = "forge@witt3rd.com" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "zk-memory @ git+https://github.com/witt3rd/zk-memory.git",
+]
 
 [project.urls]
 Homepage = "https://github.com/witt3rd/hermes-zk-memory"
@@ -18,10 +20,10 @@ Repository = "https://github.com/witt3rd/hermes-zk-memory"
 Issues = "https://github.com/witt3rd/hermes-zk-memory/issues"
 
 [project.optional-dependencies]
-# Rich full-text recall. Official PyPI `lancedb` (not a fork). Optional:
-# search degrades to a `rg`-based fallback when this extra isn't installed.
-lancedb = ["lancedb>=0.15", "pyarrow>=14"]
+# Rich full-text recall lives in zk-memory's optional `lancedb` extra.
+# Install `zk-memory[lancedb]` to enable it; otherwise search degrades
+# to a `rg`-based fallback.
 test = ["pytest>=7"]
 
 [tool.setuptools]
-py-modules = ["__init__", "zk", "lancedb_fts"]
+py-modules = ["__init__", "llm"]

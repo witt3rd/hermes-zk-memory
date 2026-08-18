@@ -1,4 +1,12 @@
-"""hermes-zk-memory — a zettelkasten-backed Hermes MemoryProvider.
+"""hermes-zk-memory — a Hermes MemoryProvider wrapping zk-memory.
+
+Thin adapter (P9): the zettelkasten corpus logic, the retain pipeline,
+and the write-time prompts/schemas all live in the host-agnostic
+``zk_memory`` library. This plugin constructs ``zk_memory.Memory``,
+implements the ``StructuredLLM`` protocol via the auxiliary-task
+forced-tool-call path (``llm.py``), and owns the Hermes-shaped surface:
+tool text formatting, threading, config/root resolution, and the
+auxiliary-task registration.
 
 One corpus of atomic notes. The same operations back both the volitional
 tool surface (get_tool_schemas/handle_tool_call) and the automatic
@@ -6,8 +14,8 @@ recall/retain motions (prefetch/sync_turn) — "auto" is an optional
 convenience over the same underlying corpus operations, not a parallel
 code path.
 
-sync_turn's write-time judgment is one forced-tool-call LLM invocation
-(llm.judge_turn) routed through the plugin's own registered auxiliary
+sync_turn's write-time judgment is a forced-tool-call LLM invocation
+(zk_memory.judge) routed through the plugin's own registered auxiliary
 task ("zk_memory_judge") — see llm.py for why this is the hermes-native
 mechanism (not ctx.llm, which memory-provider plugins can't reach).
 """
@@ -22,18 +30,20 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 
-import zk
+from zk_memory import Memory
+from zk_memory.probe import trace as _trace
+
 import llm as _llm
-from probe import trace as _trace
 
 logger = logging.getLogger(__name__)
 
 
 class ZkMemoryProvider(MemoryProvider):
-    """Hermes MemoryProvider wrapping a zettelkasten corpus."""
+    """Hermes MemoryProvider wrapping zk_memory.Memory."""
 
     def __init__(self) -> None:
         self._root: Optional[Path] = None
+        self._memory: Optional[Memory] = None
         self._sync_thread: Optional[threading.Thread] = None
 
     @property
@@ -42,7 +52,11 @@ class ZkMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         # No network calls; the corpus is plain files, rg fallback needs
-        # no extra dependency. Always available.
+        # no extra dependency. Always available (zk_memory importable).
+        try:
+            import zk_memory  # noqa: F401
+        except ImportError:
+            return False
         return True
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -61,6 +75,11 @@ class ZkMemoryProvider(MemoryProvider):
                 self._root = Path(hermes_home) / zk_root_rel
         except Exception:
             pass  # fallback to default
+        self._memory = Memory(
+            root=self._root,
+            llm=_llm.hermes_structured_llm,
+            tracer=_trace,
+        )
         _trace("initialized", self._root, session_id=session_id)
 
     def shutdown(self) -> None:
@@ -77,82 +96,82 @@ class ZkMemoryProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
-            {
-                "name": "zk_search",
-                "description": (
-                    "Search the being's zettelkasten — the deep well of recorded "
-                    "lived experience (decisions, people, seams, open questions). "
-                    "Takes a query and returns ranked note hits (title + snippet). "
-                    "Recall first: before answering from assumptions, search what "
-                    "the corpus already holds."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "What to find in the corpus."},
-                        "limit": {"type": "integer", "description": "Max hits (default 8)."},
-                    },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "zk_read",
-                "description": (
-                    "Read one zettel in full from the being's corpus. Reference by "
-                    "uuid (the canonical anchor), slug (filename stem), or path. "
-                    "Links to other notes are resolved and returned so you can "
-                    "follow the thread."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string", "description": "The note's uuid, slug, or filename."},
-                    },
-                    "required": ["ref"],
-                },
-            },
-            {
-                "name": "zk_write",
-                "description": (
-                    "Set down a new zettel in the corpus — one atomic thought, own "
-                    "words, plain-markdown links to what it connects to. The uuid is "
-                    "minted via linlink; naming is YYYYMMDD-slug.md (flat, no "
-                    "subdirectories). When a thought lands that isn't yet held, this "
-                    "is how the mind grows."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "slug": {"type": "string", "description": "Short hyphenated slug for the note (without date prefix)."},
-                        "title": {"type": "string", "description": "Human title for the note."},
-                        "body": {"type": "string", "description": "The note body: ONE atomic thought, own words. Link to related notes with [label](slug.md)."},
-                    },
-                    "required": ["slug", "title", "body"],
-                },
-            },
-            {
-                "name": "zk_tend",
-                "description": (
-                    "Tend the zettelkasten garden: heals moved/renamed references "
-                    "(repair), checks integrity (check), or mints missing uuids "
-                    "(mint). Run check after any reorg; repair when links break."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["repair", "check", "mint"],
-                            "description": "The linlink maintenance action to run.",
+                {
+                    "name": "zk_search",
+                    "description": (
+                        "Search the being's zettelkasten — the deep well of recorded "
+                        "lived experience (decisions, people, seams, open questions). "
+                        "Takes a query and returns ranked note hits (title + snippet). "
+                        "Recall first: before answering from assumptions, search what "
+                        "the corpus already holds."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "What to find in the corpus."},
+                            "limit": {"type": "integer", "description": "Max hits (default 8)."},
                         },
+                        "required": ["query"],
                     },
-                    "required": ["action"],
                 },
-            },
-        ]
+                {
+                    "name": "zk_read",
+                    "description": (
+                        "Read one zettel in full from the being's corpus. Reference by "
+                        "uuid (the canonical anchor), slug (filename stem), or path. "
+                        "Links to other notes are resolved and returned so you can "
+                        "follow the thread."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ref": {"type": "string", "description": "The note's uuid, slug, or filename."},
+                        },
+                        "required": ["ref"],
+                    },
+                },
+                {
+                    "name": "zk_write",
+                    "description": (
+                        "Set down a new zettel in the corpus — one atomic thought, own "
+                        "words, plain-markdown links to what it connects to. The uuid is "
+                        "minted via linlink; naming is YYYYMMDD-slug.md (flat, no "
+                        "subdirectories). When a thought lands that isn't yet held, this "
+                        "is how the mind grows."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string", "description": "Short hyphenated slug for the note (without date prefix)."},
+                            "title": {"type": "string", "description": "Human title for the note."},
+                            "body": {"type": "string", "description": "The note body: ONE atomic thought, own words. Link to related notes with [label](slug.md)."},
+                        },
+                        "required": ["slug", "title", "body"],
+                    },
+                },
+                {
+                    "name": "zk_tend",
+                    "description": (
+                        "Tend the zettelkasten garden: heals moved/renamed references "
+                        "(repair), checks integrity (check), or mints missing uuids "
+                        "(mint). Run check after any reorg; repair when links break."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["repair", "check", "mint"],
+                                "description": "The linlink maintenance action to run.",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
+            ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        if self._root is None:
+        if self._memory is None:
             return "error: provider not initialized"
         args = args or {}
         try:
@@ -177,7 +196,8 @@ class ZkMemoryProvider(MemoryProvider):
     def _search_text(self, query: str, limit: int) -> str:
         if not query:
             return "error: query is required"
-        hits = zk.search(query, self._root, limit=limit)
+        assert self._memory is not None
+        hits = self._memory.search(query, limit=limit)
         if not hits:
             return f"no notes found for {query!r}"
         lines = [f"Found {len(hits)} note(s) for {query!r}:"]
@@ -193,7 +213,8 @@ class ZkMemoryProvider(MemoryProvider):
     def _read_text(self, ref: str) -> str:
         if not ref:
             return "error: ref is required (uuid, slug, or path)"
-        result = zk.read(ref, self._root)
+        assert self._memory is not None
+        result = self._memory.read(ref)
         if not result["found"]:
             return f"no note found for ref {ref!r}"
         note = result["note"]
@@ -212,7 +233,8 @@ class ZkMemoryProvider(MemoryProvider):
         slug, title, body = slug.strip(), title.strip(), body.strip()
         if not slug or not title or not body:
             return "error: slug, title, and body are all required"
-        result = zk.write(slug, title, body, self._root)
+        assert self._memory is not None
+        result = self._memory.write(slug, title, body)
         if result.get("ok"):
             return f"zettel written: {result['path']}  uuid={result.get('uuid', '')}"
         return f"error: {result.get('err', 'write failed')}"
@@ -220,7 +242,8 @@ class ZkMemoryProvider(MemoryProvider):
     def _tend_text(self, action: str) -> str:
         if action not in ("repair", "check", "mint"):
             return "error: action must be one of repair, check, mint"
-        result = zk.tend(action, self._root)
+        assert self._memory is not None
+        result = self._memory.tend(action)
         head = "ok" if result.get("ok") else "FAILED"
         out = result.get("output") or result.get("err") or ""
         return f"zk_tend {action}: {head}\n{out.strip()[:1000]}"
@@ -232,10 +255,10 @@ class ZkMemoryProvider(MemoryProvider):
 
         Best-effort: never raises, failures return "".
         """
-        if self._root is None or not query:
+        if self._memory is None or not query:
             return ""
         try:
-            hits = zk.search(query, self._root, limit=5)
+            hits = self._memory.search(query, limit=5)
         except Exception as e:
             logger.warning("zk-memory prefetch failed: %s", e)
             _trace("prefetch", self._root, query=query, ok=False, error=str(e))
@@ -255,39 +278,18 @@ class ZkMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Auto-retain: off-thread, two-stage LLM judgment.
-
-        1. distill_turn — no corpus visibility — splits the turn into
-           zero or more candidates, each a "concept" (self-contained new
-           node) or an "entity_update" (a fact fragment that belongs on
-           an existing note, not standalone).
-        2. Per candidate: zk.search() its topic (no LLM). If there are
-           hits, judge_merge() compares the candidate against ALL fetched
-           hit bodies in one call and decides merge-into-existing vs.
-           create-new. No hits -> straight to create, no LLM call spent.
-        3. Write: zk.merge() (append-only) or zk.write() (new note).
-
-        No queue, no batching, no second cron-scheduled pass: everything
-        the old extractor+integrator pipeline did collapses into this
-        one off-thread run per turn.
+        """Auto-retain: off-thread, delegates the two-stage LLM judgment
+        to ``self._memory.retain_turn`` (the library's pipeline).
 
         Fires on a daemon thread and returns immediately; any prior
         in-flight sync is bounded-joined first so writes stay ordered.
         """
-        if self._root is None:
+        if self._memory is None:
             return
 
         def _run() -> None:
             try:
-                candidates = _llm.distill_turn(user_content, assistant_content)
-                _trace(
-                    "sync_turn_distilled",
-                    self._root,
-                    session_id=session_id,
-                    n_candidates=len(candidates),
-                )
-                for candidate in candidates:
-                    self._process_candidate(candidate)
+                self._memory.retain_turn(user_content, assistant_content, session_id=session_id)
             except Exception:
                 logger.warning("zk-memory: sync_turn failed", exc_info=True)
                 _trace("sync_turn_failed", self._root, session_id=session_id)
@@ -297,129 +299,44 @@ class ZkMemoryProvider(MemoryProvider):
         self._sync_thread = threading.Thread(target=_run, daemon=True, name="zk-memory-sync")
         self._sync_thread.start()
 
-    def _process_candidate(self, candidate: Dict[str, Any]) -> None:
-        """Route one distilled candidate: merge into an existing note if
-        the merge judge picks one of the search hits, otherwise create a
-        new note. Never raises — failures are logged and skipped so one
-        bad candidate doesn't drop the rest of the turn's candidates.
-        """
-        try:
-            topic = (candidate.get("topic") or candidate.get("title") or "").strip()
-            hits = zk.search(topic, self._root, limit=3) if topic else []
-
-            target_ref = None
-            if hits:
-                notes = []
-                for h in hits:
-                    ref = h.get("uuid") or h.get("slug")
-                    if not ref:
-                        continue
-                    result = zk.read(ref, self._root, resolve_links=False)
-                    if result["found"]:
-                        notes.append(result["note"])
-                if notes:
-                    decision = _llm.judge_merge(candidate, notes)
-                    if decision and decision.get("action") == "merge":
-                        candidate_ref = (decision.get("merge_target_ref") or "").strip()
-                        valid_refs = {n.get("uuid") for n in notes if n.get("uuid")}
-                        if candidate_ref and candidate_ref in valid_refs:
-                            target_ref = candidate_ref
-                        elif candidate_ref:
-                            logger.warning(
-                                "zk-memory: merge_target_ref %r not among fetched hits; falling back to create",
-                                candidate_ref,
-                            )
-
-            kind = candidate.get("kind", "")
-
-            if target_ref:
-                content = (candidate.get("content") or "").strip()
-                if not content:
-                    _trace(
-                        "candidate_decision", self._root, kind=kind, topic=topic,
-                        action="merge_skipped_empty_content", target=target_ref,
-                    )
-                    return
-                result = zk.merge(target_ref, content, self._root)
-                if not result.get("ok"):
-                    logger.warning("zk-memory: merge failed: %s", result.get("err"))
-                _trace(
-                    "candidate_decision", self._root, kind=kind, topic=topic,
-                    action="merge", target=target_ref, ok=result.get("ok"),
-                    err=result.get("err"),
-                )
-                return
-
-            slug = (candidate.get("slug") or "").strip()
-            title = (candidate.get("title") or "").strip()
-            content = (candidate.get("content") or "").strip()
-            if not slug or not title or not content:
-                logger.warning("zk-memory: candidate incomplete (slug/title/content); skipping")
-                _trace(
-                    "candidate_decision", self._root, kind=kind, topic=topic,
-                    action="create_skipped_incomplete",
-                )
-                return
-            result = zk.write(slug, title, content, self._root)
-            if not result.get("ok"):
-                logger.warning("zk-memory: create failed: %s", result.get("err"))
-            _trace(
-                "candidate_decision", self._root, kind=kind, topic=topic,
-                action="create", slug=slug, ok=result.get("ok"), err=result.get("err"),
-            )
-        except Exception:
-            logger.warning("zk-memory: candidate processing failed", exc_info=True)
-            _trace("candidate_decision", self._root, action="failed")
-
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Called by hermes immediately before context compression
         discards ``messages`` (the middle window about to be
         summarized away).
 
         Runs the same distill-then-merge-or-create judgment sync_turn
-        uses (via _llm.distill_messages / self._process_candidate),
-        scoped to exactly this about-to-be-dropped batch. This closes
-        the gap docs/memory.md §6.8.2 flagged: without it, nothing
-        promotes what compaction is about to drop into the
-        zettelkasten specifically at the compaction boundary — retain
-        relied entirely on sync_turn's per-turn cadence already having
-        caught up, which a burst of turns racing sync_turn's
-        background thread could outrun.
+        uses (via ``self._memory.retain_messages``), scoped to exactly
+        this about-to-be-dropped batch. This closes the gap
+        docs/memory.md §6.8.2 flagged: without it, nothing promotes what
+        compaction is about to drop into the zettelkasten specifically
+        at the compaction boundary — retain relied entirely on
+        sync_turn's per-turn cadence already having caught up, which a
+        burst of turns racing sync_turn's background thread could outrun.
 
         Runs SYNCHRONOUSLY, unlike sync_turn: the caller needs the
-        return value before compress() proceeds, and this fires
-        rarely (once per compaction event), so the extra latency is
+        return value before compress() proceeds, and this fires rarely
+        (once per compaction event), so the extra latency is
         proportionate to the cost compaction already pays for its own
         summarization call.
 
-        Known tradeoff: if sync_turn already processed these same
-        turns (the common case), this re-distills the same content —
-        the merge judge should usually recognize an already-written
-        near-duplicate and merge into it rather than create a new
-        note, but a redundant append is possible. Accepted as a rare,
-        benign cost rather than engineering de-duplication against
-        sync_turn's already-processed turns.
+        Known tradeoff: if sync_turn already processed these same turns
+        (the common case), this re-distills the same content — the merge
+        judge should usually recognize an already-written near-duplicate
+        and merge into it rather than create a new note, but a redundant
+        append is possible. Accepted as a rare, benign cost rather than
+        engineering de-duplication against sync_turn's already-processed
+        turns.
 
         Returns a short receipt threaded into the compressor's summary
-        prompt (memory_context) — the retention itself already
-        happened as a side effect by the time this returns; the
-        receipt is a bonus hint for the summarizer, not the mechanism.
-        Never raises; returns "" on any failure or nothing to retain.
+        prompt (memory_context) — the retention itself already happened
+        as a side effect by the time this returns; the receipt is a bonus
+        hint for the summarizer, not the mechanism. Never raises; returns
+        "" on any failure or nothing to retain.
         """
-        if self._root is None or not messages:
+        if self._memory is None or not messages:
             return ""
         try:
-            candidates = _llm.distill_messages(messages)
-            titles = []
-            for candidate in candidates:
-                self._process_candidate(candidate)
-                label = (candidate.get("title") or candidate.get("topic") or "").strip()
-                if label:
-                    titles.append(label)
-            _trace(
-                "pre_compress", self._root, n_messages=len(messages),
-                n_candidates=len(candidates),
-            )
+            titles = self._memory.retain_messages(messages)
             if not titles:
                 return ""
             return (

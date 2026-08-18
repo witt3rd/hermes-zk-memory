@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+def _corpus(provider):
+    import zk_memory.corpus as corpus
+    return corpus
+
+
 def test_get_tool_schemas_returns_exactly_four_expected_tools(provider):
     schemas = provider.get_tool_schemas()
     names = {s["name"] for s in schemas}
@@ -30,18 +35,16 @@ def test_handle_tool_call_zk_search_missing_query(provider):
 
 
 def test_handle_tool_call_zk_search_no_hits(provider, monkeypatch):
-    import zk
-    monkeypatch.setattr(zk, "search", lambda query, root, limit=8: [])
+    monkeypatch.setattr(provider._memory, "search", lambda query, **kw: [])
     out = provider.handle_tool_call("zk_search", {"query": "nothing"})
     assert "no notes found" in out
 
 
 def test_handle_tool_call_zk_search_with_hits(provider, monkeypatch):
-    import zk
     monkeypatch.setattr(
-        zk,
+        provider._memory,
         "search",
-        lambda query, root, limit=8: [
+        lambda query, **kw: [
             {"title": "T1", "slug": "t1", "path": "20260101-t1.md", "uuid": "u1", "snippet": "some snippet"}
         ],
     )
@@ -62,9 +65,9 @@ def test_handle_tool_call_zk_read_not_found(provider):
 
 
 def test_handle_tool_call_zk_read_found_with_links(provider):
-    import zk
-    zk.write("t1", "T One", "Body about [t2](t2-slug.md).", provider._root)
-    written = [n for n in zk.list_notes(provider._root)][0]
+    corpus = _corpus(provider)
+    corpus.write("t1", "T One", "Body about [t2](t2-slug.md).", provider._root)
+    written = corpus.list_notes(provider._root)[0]
 
     out = provider.handle_tool_call("zk_read", {"ref": written["uuid"] or written["slug"]})
     assert "T One" in out
@@ -98,19 +101,17 @@ def test_handle_tool_call_zk_tend_invalid_action(provider):
 
 
 def test_handle_tool_call_zk_tend_missing_linlink(provider, monkeypatch):
-    import zk
-    monkeypatch.setattr(zk.shutil, "which", lambda name: None)
+    corpus = _corpus(provider)
+    monkeypatch.setattr(corpus.shutil, "which", lambda name: None)
     out = provider.handle_tool_call("zk_tend", {"action": "check"})
     assert "zk_tend check: FAILED" in out
     assert "linlink not on PATH" in out
 
 
 def test_handle_tool_call_exception_path_returns_error_string(provider, monkeypatch):
-    import zk
-
     def _boom(*a, **kw):
         raise ValueError("kaboom")
 
-    monkeypatch.setattr(zk, "search", _boom)
+    monkeypatch.setattr(provider._memory, "search", _boom)
     out = provider.handle_tool_call("zk_search", {"query": "x"})
     assert out == "error: kaboom"
