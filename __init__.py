@@ -33,7 +33,14 @@ from agent.memory_provider import MemoryProvider
 from zk_memory import Memory
 from zk_memory.probe import trace as _trace
 
-import llm as _llm
+# Relative (not bare) sibling import: hermes loads a user-installed memory
+# provider under the synthetic namespace _hermes_user_memory.<name> and
+# registers its siblings as submodules, but does NOT put the provider's own
+# directory on sys.path. Bare `import llm` raises ModuleNotFoundError under
+# that loader, so no provider instance is created and recall/retain silently
+# never fire (caught by the being-plugin Behavioral rig). `from . import llm`
+# resolves against the package hermes registers.
+from . import llm as _llm
 
 logger = logging.getLogger(__name__)
 
