@@ -19,6 +19,9 @@ Homepage = "https://github.com/witt3rd/hermes-zk-memory"
 Repository = "https://github.com/witt3rd/hermes-zk-memory"
 Issues = "https://github.com/witt3rd/hermes-zk-memory/issues"
 
+[project.entry-points."hermes_agent.memory_providers"]
+zk-memory = "hermes_zk_memory:register"
+
 [project.optional-dependencies]
 # Rich full-text recall lives in zk-memory's optional `lancedb` extra.
 # Install `zk-memory[lancedb]` to enable it; otherwise search degrades
