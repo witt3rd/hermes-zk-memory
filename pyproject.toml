@@ -11,7 +11,7 @@ license = { text = "MIT" }
 authors = [{ name = "Forge ⚒️ & Donald", email = "forge@witt3rd.com" }]
 requires-python = ">=3.11"
 dependencies = [
-    "zk-memory[lancedb] @ git+https://github.com/witt3rd/zk-memory.git@v0.3.0",
+    "zk-memory[lancedb] @ git+https://github.com/witt3rd/zk-memory.git@v0.4.0",
 ]
 
 [project.urls]
