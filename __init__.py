@@ -40,7 +40,15 @@ from zk_memory.probe import trace as _trace
 # that loader, so no provider instance is created and recall/retain silently
 # never fire (caught by the being-plugin Behavioral rig). `from . import llm`
 # resolves against the package hermes registers.
-from . import llm as _llm
+#
+# A flat import (e.g. pytest importing this root __init__.py directly, with
+# no package parent) has no relative sibling to resolve — fall back to the
+# absolute sibling import there, so the module stays importable in both
+# contexts.
+try:
+    from . import llm as _llm
+except ImportError:
+    import llm as _llm  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
