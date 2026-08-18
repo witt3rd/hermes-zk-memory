@@ -3,7 +3,7 @@ version: 0.1.0
 description: "Zettelkasten-backed memory provider — atomic notes, LLM-judged retain, full-text recall (thin adapter over zk-memory)."
 requirements: []
 pip_dependencies:
-  - "zk-memory @ git+https://github.com/witt3rd/zk-memory.git@v0.1.0"
+  - "zk-memory @ git+https://github.com/witt3rd/zk-memory.git@v0.3.0"
 hooks:
   - initialize
   - prefetch
