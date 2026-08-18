@@ -93,14 +93,48 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def _load_plugin_module():
-    """Load the plugin's root __init__.py as 'hermes_zk_memory_plugin'."""
-    mod_name = "hermes_zk_memory_plugin"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, str(REPO_ROOT / "__init__.py"))
+    """Load the plugin's root __init__.py the way hermes does — as a package
+    under the synthetic user-namespace (_hermes_user_memory.<name>), with
+    siblings registered as submodules — so its RELATIVE sibling imports
+    (``from . import llm as _llm``) resolve the same as at runtime.
+
+    hermes' loader (plugins/memory/__init__.py:_load_provider_from_dir) does
+    exactly this for a user-installed provider. Tests must reproduce it or the
+    plugin's relative imports fail under the flat import."""
+    pkg_name = "_hermes_user_memory"
+    name = "hermes_zk_memory"
+    module_name = f"{pkg_name}.{name}"
+
+    if pkg_name not in sys.modules:
+        parent = importlib.util.module_from_spec(
+            importlib.machinery.ModuleSpec(pkg_name, None, is_package=True)
+        )
+        parent.__path__ = []
+        sys.modules[pkg_name] = parent
+    for sub_file in sorted(REPO_ROOT.glob("*.py")):
+        if sub_file.name == "__init__.py":
+            continue
+        sub = sub_file.stem
+        full = f"{module_name}.{sub}"
+        if full not in sys.modules:
+            sub_spec = importlib.util.spec_from_file_location(full, str(sub_file))
+            if sub_spec and sub_spec.loader:
+                sub_mod = importlib.util.module_from_spec(sub_spec)
+                sys.modules[full] = sub_mod
+                try:
+                    sub_spec.loader.exec_module(sub_mod)
+                except Exception:
+                    pass
+    if module_name in sys.modules and getattr(sys.modules[module_name], "__file__", None):
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(
+        module_name, str(REPO_ROOT / "__init__.py"),
+        submodule_search_locations=[str(REPO_ROOT)],
+    )
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
+    mod.__package__ = module_name  # required for `from . import llm`
+    sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
     return mod
 

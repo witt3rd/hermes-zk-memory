@@ -86,6 +86,11 @@ class ZkMemoryProvider(MemoryProvider):
             root=self._root,
             llm=_llm.hermes_structured_llm,
             tracer=_trace,
+            # Beings run on a git-backed filesystem (rg backend reads live repo
+            # files — single-writer, unsafe to share, races concurrent writes).
+            # Default to LanceDB FTS for shared-safe recall; operator can force
+            # rg/auto via ZK_MEMORY_BACKEND.
+            backend=os.environ.get("ZK_MEMORY_BACKEND", "").strip() or "fts",
         )
         _trace("initialized", self._root, session_id=session_id)
 
