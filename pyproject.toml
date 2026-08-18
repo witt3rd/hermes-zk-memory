@@ -11,7 +11,7 @@ license = { text = "MIT" }
 authors = [{ name = "Forge ⚒️ & Donald", email = "forge@witt3rd.com" }]
 requires-python = ">=3.11"
 dependencies = [
-    "zk-memory @ git+https://github.com/witt3rd/zk-memory.git@v0.1.0",
+    "zk-memory[lancedb] @ git+https://github.com/witt3rd/zk-memory.git@v0.2.0",
 ]
 
 [project.urls]
@@ -24,6 +24,12 @@ Issues = "https://github.com/witt3rd/hermes-zk-memory/issues"
 # Install `zk-memory[lancedb]` to enable it; otherwise search degrades
 # to a `rg`-based fallback.
 test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+# The plugin root carries __init__.py (loaded as a package by hermes). Collect
+# only tests/ so pytest never imports the root __init__.py flat (whose relative
+# sibling imports would fail without a package parent).
+testpaths = ["tests"]
 
 [tool.setuptools]
 py-modules = ["__init__", "llm"]
