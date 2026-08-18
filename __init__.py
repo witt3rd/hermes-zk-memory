@@ -30,8 +30,25 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 
-from zk_memory import Memory
-from zk_memory.probe import trace as _trace
+# Lazy-loaded imports — zk_memory library is NOT imported at scope.
+# The official hermes memory plugins (hindsight, etc.) work because they
+# only import from agent.memory_provider and their own local modules at
+# scope. The zk_memory library is imported lazily inside methods to avoid
+# the loading-failure that occurs when the module is loaded under hermes'
+# synthetic namespace (_user_namespace.<name>) before the library is
+# importable. Aligns with hindsight's pattern.
+import importlib
+
+def _zk_memory():  # noqa: E302
+    """Lazy import of the zk_memory library, cached after first call."""
+    try:
+        return importlib.import_module("zk_memory")
+    except ImportError:
+        raise ImportError("zk-memory library not installed; install with: pip install zk-memory[lancedb]")
+
+def _zk_trace():  # noqa: E302
+    """Lazy import of zk_memory.probe.trace, cached after first call."""
+    return _zk_memory().probe.trace
 
 # Relative (not bare) sibling import: hermes loads a user-installed memory
 # provider under the synthetic namespace _hermes_user_memory.<name> and
@@ -58,7 +75,7 @@ class ZkMemoryProvider(MemoryProvider):
 
     def __init__(self) -> None:
         self._root: Optional[Path] = None
-        self._memory: Optional[Memory] = None
+        self._memory = None
         self._sync_thread: Optional[threading.Thread] = None
 
     @property
@@ -90,23 +107,24 @@ class ZkMemoryProvider(MemoryProvider):
                 self._root = Path(hermes_home) / zk_root_rel
         except Exception:
             pass  # fallback to default
-        self._memory = Memory(
+        from zk_memory import Memory as _Memory
+        self._memory = _Memory(
             root=self._root,
             llm=_llm.hermes_structured_llm,
-            tracer=_trace,
+            tracer=_zk_trace(),
             # Beings run on a git-backed filesystem (rg backend reads live repo
             # files — single-writer, unsafe to share, races concurrent writes).
             # Default to LanceDB FTS for shared-safe recall; operator can force
             # rg/auto via ZK_MEMORY_BACKEND.
             backend=os.environ.get("ZK_MEMORY_BACKEND", "").strip() or "fts",
         )
-        _trace("initialized", self._root, session_id=session_id)
+        _zk_trace()("initialized", self._root, session_id=session_id)
 
     def shutdown(self) -> None:
         t = self._sync_thread
         if t is not None and t.is_alive():
             t.join(timeout=5.0)
-        _trace("shutdown", self._root)
+        _zk_trace()("shutdown", self._root)
 
     # ---- volitional tool surface -------------------------------------
     #
@@ -204,13 +222,13 @@ class ZkMemoryProvider(MemoryProvider):
             elif tool_name == "zk_tend":
                 result = self._tend_text(args.get("action", ""))
             else:
-                _trace("tool_call", self._root, tool=tool_name, ok=False, reason="unknown_tool")
+                _zk_trace()("tool_call", self._root, tool=tool_name, ok=False, reason="unknown_tool")
                 return f"error: unknown tool: {tool_name}"
-            _trace("tool_call", self._root, tool=tool_name, ok=not result.startswith("error"))
+            _zk_trace()("tool_call", self._root, tool=tool_name, ok=not result.startswith("error"))
             return result
         except Exception as e:
             logger.warning("zk-memory tool %s failed: %s", tool_name, e)
-            _trace("tool_call", self._root, tool=tool_name, ok=False, error=str(e))
+            _zk_trace()("tool_call", self._root, tool=tool_name, ok=False, error=str(e))
             return f"error: {e}"
 
     def _search_text(self, query: str, limit: int) -> str:
@@ -281,9 +299,9 @@ class ZkMemoryProvider(MemoryProvider):
             hits = self._memory.search(query, limit=5)
         except Exception as e:
             logger.warning("zk-memory prefetch failed: %s", e)
-            _trace("prefetch", self._root, query=query, ok=False, error=str(e))
+            _zk_trace()("prefetch", self._root, query=query, ok=False, error=str(e))
             return ""
-        _trace("prefetch", self._root, query=query, ok=True, hits=len(hits))
+        _zk_trace()("prefetch", self._root, query=query, ok=True, hits=len(hits))
         if not hits:
             return ""
         lines = [f'<recall query="{query}">']
@@ -312,7 +330,7 @@ class ZkMemoryProvider(MemoryProvider):
                 self._memory.retain_turn(user_content, assistant_content, session_id=session_id)
             except Exception:
                 logger.warning("zk-memory: sync_turn failed", exc_info=True)
-                _trace("sync_turn_failed", self._root, session_id=session_id)
+                _zk_trace()("sync_turn_failed", self._root, session_id=session_id)
 
         if self._sync_thread is not None and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
@@ -365,7 +383,7 @@ class ZkMemoryProvider(MemoryProvider):
             )
         except Exception:
             logger.warning("zk-memory: on_pre_compress failed", exc_info=True)
-            _trace("pre_compress_failed", self._root, n_messages=len(messages))
+            _zk_trace()("pre_compress_failed", self._root, n_messages=len(messages))
             return ""
 
 
@@ -380,4 +398,4 @@ def register(ctx) -> None:
     ctx.register_memory_provider(ZkMemoryProvider())
     # No corpus root yet at register() time (that's resolved per-session in
     # initialize()) -- log-only, no trace file write.
-    _trace("registered", None, task_key=_llm.TASK_KEY)
+    _zk_trace()("registered", None, task_key=_llm.TASK_KEY)
