@@ -99,18 +99,34 @@ class ZkMemoryProvider(MemoryProvider):
         # Being-plugin writes memory.zk_corpus_root to the profile's config.yaml
         # during provisioning. If present, use that path instead.
         self._root = Path(hermes_home) / "zk"
+        llm = None
+        provider = model = None
         try:
             from hermes_cli.config import load_config_readonly
             cfg = load_config_readonly()
-            zk_root_rel = (cfg.get("memory") or {}).get("zk_corpus_root")
+            memory_cfg = cfg.get("memory") or {}
+            zk_root_rel = memory_cfg.get("zk_corpus_root")
             if zk_root_rel:
                 self._root = Path(hermes_home) / zk_root_rel
+            zk_judge = memory_cfg.get("zk_judge") or {}
+            provider = str(zk_judge.get("provider", "")).strip() or None
+            model = str(zk_judge.get("model", "")).strip() or None
         except Exception:
-            pass  # fallback to default
+            pass  # fallback to default root; judge config stays unset
+        if provider and model:
+            llm = _llm.build_structured_llm(provider, model)
+        else:
+            # The being owns which LLM runs its write-time judgment; without an
+            # explicit provider/model we do NOT inherit hermes' default routing
+            # -- retain disables (corpus ops still work).
+            logger.warning(
+                "zk-memory: memory.zk_judge.provider/model not configured in the "
+                "profile config; write-time retain disabled (corpus ops still work)"
+            )
         from zk_memory import Memory as _Memory
         self._memory = _Memory(
             root=self._root,
-            llm=_llm.hermes_structured_llm,
+            llm=llm,
             tracer=_zk_trace(),
             # Beings run on a git-backed filesystem (rg backend reads live repo
             # files — single-writer, unsafe to share, races concurrent writes).
@@ -389,11 +405,15 @@ class ZkMemoryProvider(MemoryProvider):
 
 def register(ctx) -> None:
     """Called by Hermes memory plugin discovery."""
+    # No default provider/model here: the being owns which LLM runs its
+    # write-time judgment via config.yaml (memory.zk_judge.provider/model).
+    # The auxiliary task is registered for hermes' accounting/routing/UI
+    # surface, but routing is explicit per-call from the plugin's config --
+    # never inherited from hermes' default model.
     ctx.register_auxiliary_task(
         key=_llm.TASK_KEY,
         display_name="ZK memory write-time judge",
         description="Distills turns into zettel candidates and judges merge-vs-create.",
-        defaults={"provider": _llm._DEFAULT_PROVIDER, "model": _llm._DEFAULT_MODEL},
     )
     ctx.register_memory_provider(ZkMemoryProvider())
     # No corpus root yet at register() time (that's resolved per-session in

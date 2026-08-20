@@ -1,12 +1,12 @@
 # HANDOFF — hermes-zk-memory
 
-**Last updated:** 2026-08-18 — pinned to `zk-memory@v0.4.0` (tend_writes); docs + caretaker skill added.
+**Last updated:** 2026-08-19 — judge LLM is now config-driven (`memory.zk_judge.provider/model`); baked anthropic default removed.
 
 ## State
 
 - Primary clone on `master` at `origin/master` tip (`a7b9751`); clean (only pre-existing untracked `uv.lock`).
 - `AGENTS.md` is now the single source of truth; `README.md` is a symlink to it. `skills/caretaker/` added.
-- **39 tests pass** (`.venv/bin/python -m pytest`). Uses real hermes-agent at `/home/dt/.hermes/hermes-agent`; sibling `zk-memory` on `sys.path` via conftest.
+- **43 tests pass** (`.venv/bin/python -m pytest`). Uses real hermes-agent at `/home/dt/.hermes/hermes-agent`; sibling `zk-memory` on `sys.path` via conftest.
 
 ## What this is
 
@@ -19,9 +19,14 @@ Same split shape as `hermes-prospecta`/`prospecta`.
   threading, root/config resolution, `register_auxiliary_task`. Sibling import is relative
   `from . import llm` with a flat-import fallback (`import llm`), so it loads under both hermes'
   package loader and pytest's flat import.
-- `llm.py` — the `StructuredLLM` adapter: `TASK_KEY` (`zk_memory_judge`), `_DEFAULT_PROVIDER`
-  (`anthropic`), `_DEFAULT_MODEL` (`claude-sonnet-5`), `_resolve_client`, `_forced_tool_call`,
-  `hermes_structured_llm(messages, *, schema, name)`.
+- `llm.py` — the `StructuredLLM` adapter: `TASK_KEY` (`zk_memory_judge`),
+  `build_structured_llm(provider, model)` (the bound callable the plugin passes to `Memory`),
+  `hermes_structured_llm(messages, *, schema, name)` (config-reading backward-compat wrapper),
+  `_resolve_client(provider=None, model=None)`, `_forced_tool_call`. No baked provider/model —
+  the being's `memory.zk_judge` config supplies them explicitly.
+- `__init__.py` `initialize()` reads `memory.zk_judge.provider/model` from the profile
+  config.yaml; missing/incomplete config disables retain (llm=None) with a clear log, never
+  falls back to a hermes default model.
 - Deps: `pyproject.toml` (`[lancedb]`) + `plugin.yaml` both pinned to `zk-memory @ ...@v0.4.0`.
 
 ## Version-pin history

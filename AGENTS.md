@@ -39,12 +39,22 @@ threading, root/config resolution, auxiliary task registration).
   synchronously, returning a receipt string for the compressor's summary prompt.
 - **`Memory.tend_writes`** is the gardener pass (recent-writes-first integration) — driven by a
   caretaker host/agent, not by this plugin's per-turn hooks.
-- **The LLM is a `StructuredLLM` adapter** (`llm.py`): `hermes_structured_llm(messages, *,
-  schema, name)` builds the tool dict from `zk_memory.judge.TOOL_DESCRIPTIONS` + schema and
-  routes the plugin's auxiliary-task forced-tool-call path.
+- **The LLM is a `StructuredLLM` adapter** (`llm.py`): `build_structured_llm(provider, model)`
+  returns the callable the library's retain pipeline calls — it builds the tool dict from
+  `zk_memory.judge.TOOL_DESCRIPTIONS` + schema and routes the plugin's auxiliary-task
+  forced-tool-call path (`hermes_structured_llm` remains as a config-reading backward-compat
+  wrapper).
 
 ## Mechanisms
 
+- **Write-time judge is config-driven, never inherited.** The being owns which LLM runs its
+  judgment: `initialize()` reads `memory.zk_judge.provider/model` from the profile's
+  config.yaml and binds a `build_structured_llm` to those explicit values. The explicit
+  provider/model are passed straight to `agent.auxiliary_client._resolve_task_provider_model`
+  (which always-wins over config/auto), so routing rides hermes' transport but the model is the
+  being's, not hermes' default. Missing/incomplete config **disables retain** (llm=None, corpus
+  ops still work) with a clear log — we never silently fall back to a baked model. Reserve
+  `memory.zk_embedding.provider/model` for future vector recall.
 - **Import shape.** `from . import llm as _llm` (relative) — required by Hermes' plugin loader,
   which registers the provider under a synthetic `_hermes_user_memory.<name>` namespace package
   without putting the plugin dir on `sys.path`. The sibling import has a **flat-import fallback**

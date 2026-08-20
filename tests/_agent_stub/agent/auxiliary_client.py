@@ -12,7 +12,14 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 
-def _resolve_task_provider_model(*, task: str) -> Tuple[Any, Any, Any, Any, Any]:
+def _resolve_task_provider_model(
+    *,
+    task: str,
+    provider: Any = None,
+    model: Any = None,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Tuple[Any, Any, Any, Any, Any]:
     """Stub: real signature returns (provider, model, base_url, api_key, api_mode)."""
     raise RuntimeError("stub agent.auxiliary_client._resolve_task_provider_model called")
 
