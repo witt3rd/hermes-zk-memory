@@ -8,12 +8,13 @@ receive a real PluginContext (register() only forwards register_* calls
 -- see plugins/memory/__init__.py's _ProviderCollector), so ctx.llm is
 unreachable from this plugin category regardless of preference.
 
-The model/provider are NOT baked here and do NOT default to hermes'
-runtime: they are supplied explicitly by the plugin from the profile's
-config.yaml (``memory.zk_judge.provider/model``), so the being owns which
-LLM runs its write-time judgment. All prompts and JSON schemas live in the
-library (``zk_memory.judge``); this module is the thin adapter that turns
-a ``(messages, schema, name)`` call into the forced-tool-call path.
+The routing (provider/model/base_url/api_key/timeout/extra_body) is NOT
+baked here and does NOT default to hermes' runtime: it comes explicitly
+from the profile's ``auxiliary.zk_memory_judge`` config block, so the
+being owns which LLM runs its write-time judgment. All prompts and JSON
+schemas live in the library (``zk_memory.judge``); this module is the thin
+adapter that turns a ``(messages, schema, name)`` call into the
+forced-tool-call path.
 
 Import of agent.auxiliary_client is lazy and guarded so this module
 stays importable (and unit-testable) outside a hermes-agent install --
@@ -34,43 +35,39 @@ logger = logging.getLogger(__name__)
 TASK_KEY = "zk_memory_judge"
 
 
-def _read_judge_config() -> tuple[Optional[str], Optional[str]]:
-    """Return (provider, model) from the profile's ``auxiliary.zk_memory_judge``.
+def _read_judge_config() -> dict[str, Any]:
+    """Return the profile's ``auxiliary.zk_memory_judge`` config block.
 
     This is the existing config block hermes manages for the plugin's
     auxiliary task (register_auxiliary_task bridges it to
-    ``AUXILIARY_ZK_MEMORY_JUDGE_*`` env vars). Both provider and model are
-    required for the write-time judge to run. Never raises: returns
-    (None, None) when hermes_cli is unreachable or the block is
-    absent/incomplete.
+    ``AUXILIARY_ZK_MEMORY_JUDGE_*`` env vars). Never raises: returns {} when
+    hermes_cli is unreachable or the block is absent.
     """
     try:
         from hermes_cli.config import load_config_readonly
         cfg = load_config_readonly()
     except Exception:
-        return None, None
-    aux = cfg.get("auxiliary") or {}
-    task_cfg = aux.get(TASK_KEY) or {}
-    provider = str(task_cfg.get("provider", "")).strip() or None
-    model = str(task_cfg.get("model", "")).strip() or None
-    return provider, model
+        return {}
+    aux = cfg.get("auxiliary") if isinstance(cfg, dict) else {}
+    task_cfg = aux.get(TASK_KEY) if isinstance(aux, dict) else {}
+    return task_cfg if isinstance(task_cfg, dict) else {}
 
 
 def build_structured_llm(
-    provider: Optional[str],
-    model: Optional[str],
+    cfg: dict[str, Any],
 ) -> Callable[..., Optional[dict[str, Any]]]:
-    """Return a StructuredLLM callable bound to explicit ``provider`` +
-    ``model`` (the profile-config values, threaded through hermes' own
-    auxiliary_client transport). A missing provider/model yields a no-op
-    callable, so retain degrades gracefully instead of guessing a model."""
+    """Return a StructuredLLM callable bound to the judge config block
+    (provider/model/base_url/api_key/timeout/extra_body), threaded through
+    hermes' own auxiliary_client transport. A missing provider/model yields
+    a no-op callable, so retain degrades gracefully instead of guessing a
+    model."""
     def _adapter(
         messages: list[dict[str, str]],
         *,
         schema: dict,
         name: str,
     ) -> Optional[dict[str, Any]]:
-        return _call_judge(provider, model, messages, schema=schema, name=name)
+        return _call_judge(cfg, messages, schema=schema, name=name)
     return _adapter
 
 
@@ -80,17 +77,14 @@ def hermes_structured_llm(
     schema: dict,
     name: str,
 ) -> Optional[dict[str, Any]]:
-    """StructuredLLM adapter that resolves provider/model from the profile
-    config on each call. Kept for backward compatibility; the plugin's
-    ``initialize()`` prefers an explicit ``build_structured_llm`` bound at
-    setup time."""
-    provider, model = _read_judge_config()
-    return _call_judge(provider, model, messages, schema=schema, name=name)
+    """StructuredLLM adapter that resolves the judge config on each call.
+    Kept for backward compatibility; the plugin's ``initialize()`` prefers
+    an explicit ``build_structured_llm`` bound at setup time."""
+    return _call_judge(_read_judge_config(), messages, schema=schema, name=name)
 
 
 def _call_judge(
-    provider: Optional[str],
-    model: Optional[str],
+    cfg: dict[str, Any],
     messages: list[dict[str, str]],
     *,
     schema: dict,
@@ -98,6 +92,8 @@ def _call_judge(
 ) -> Optional[dict[str, Any]]:
     """One forced-tool-call completion, or None on any failure. Never
     raises."""
+    provider = str(cfg.get("provider", "")).strip() or None
+    model = str(cfg.get("model", "")).strip() or None
     if not provider or not model:
         logger.warning(
             "zk-memory: auxiliary.%s.provider/model not configured; "
@@ -105,7 +101,13 @@ def _call_judge(
             TASK_KEY,
         )
         return None
-    client, resolved_model = _resolve_client(provider=provider, model=model)
+    base_url = str(cfg.get("base_url", "")).strip() or None
+    api_key = str(cfg.get("api_key", "")).strip() or None
+    timeout = cfg.get("timeout")
+    extra_body = cfg.get("extra_body")
+    client, resolved_model = _resolve_client(
+        provider=provider, model=model, base_url=base_url, api_key=api_key,
+    )
     if client is None:
         return None
     system_prompt = ""
@@ -125,7 +127,10 @@ def _call_judge(
             "parameters": schema,
         },
     }
-    return _forced_tool_call(client, resolved_model, system_prompt, user_text, tool, name)
+    return _forced_tool_call(
+        client, resolved_model, system_prompt, user_text, tool, name,
+        timeout=timeout, extra_body=extra_body,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +140,16 @@ def _call_judge(
 def _resolve_client(
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ):
     """Return (client, model) via the plugin's own auxiliary task, or
     (None, None) on any failure -- including agent.auxiliary_client not
     being importable (standalone/test context). The explicit
-    provider/model always win over config/auto (auxiliary_client's
-    documented priority), so the caller's ``memory.zk_judge`` values are
-    authoritative -- nothing is inherited from hermes' default routing."""
+    provider/model/base_url/api_key always win over config/auto
+    (auxiliary_client's documented priority), so the caller's
+    ``auxiliary.zk_memory_judge`` values are authoritative -- nothing is
+    inherited from hermes' default routing."""
     try:
         from agent import auxiliary_client as aux
     except ImportError:
@@ -150,6 +158,7 @@ def _resolve_client(
         provider, model, base_url, api_key, api_mode = (
             aux._resolve_task_provider_model(
                 task=TASK_KEY, provider=provider, model=model,
+                base_url=base_url, api_key=api_key,
             )
         )
         return aux.resolve_provider_client(
@@ -172,9 +181,19 @@ def _forced_tool_call(
     user_text: str,
     tool: dict[str, Any],
     tool_name: str,
+    *,
+    timeout: Any = None,
+    extra_body: Any = None,
 ) -> Optional[dict[str, Any]]:
     """One forced-tool-call completion; returns the parsed arguments
-    dict, or None on any failure. Never raises."""
+    dict, or None on any failure. Never raises. ``timeout`` / ``extra_body``
+    come from the auxiliary config block and are forwarded to the provider
+    call."""
+    kwargs: dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     try:
         response = client.chat.completions.create(
             model=model,
@@ -185,6 +204,7 @@ def _forced_tool_call(
             tools=[tool],
             tool_choice="required",
             max_tokens=1500,
+            **kwargs,
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or (

@@ -48,14 +48,15 @@ threading, root/config resolution, auxiliary task registration).
 ## Mechanisms
 
 - **Write-time judge is config-driven, never inherited.** The being owns which LLM runs its
-  judgment: `initialize()` reads `auxiliary.zk_memory_judge.provider/model` — the config block
-  hermes already manages for the plugin's auxiliary task — and binds a `build_structured_llm` to
-  those explicit values. The explicit provider/model are passed straight to
-  `agent.auxiliary_client._resolve_task_provider_model` (which always-wins over config/auto), so
-  routing rides hermes' transport but the model is the being's, not hermes' default.
-  Missing/incomplete config **disables retain** (llm=None, corpus ops still work) with a clear
-  log — we never silently fall back to a baked model. Future vector recall would read a sibling
-  `auxiliary.zk_memory_embedding.provider/model` block.
+  judgment: `initialize()` reads the whole `auxiliary.zk_memory_judge` block — the config hermes
+  already manages for the plugin's auxiliary task — and binds a `build_structured_llm` to those
+  explicit values. `provider`/`model`/`base_url`/`api_key` are passed straight to
+  `agent.auxiliary_client._resolve_task_provider_model` (which always-wins over config/auto);
+  `timeout`/`extra_body` are forwarded to the provider call. So routing rides hermes' transport
+  but the model and transport knobs are the being's, not hermes' default. Missing/incomplete
+  `provider`/`model` **disables retain** (llm=None, corpus ops still work) with a clear log — we
+  never silently fall back to a baked model. Future vector recall would read a sibling
+  `auxiliary.zk_memory_embedding` block.
 - **Import shape.** `from . import llm as _llm` (relative) — required by Hermes' plugin loader,
   which registers the provider under a synthetic `_hermes_user_memory.<name>` namespace package
   without putting the plugin dir on `sys.path`. The sibling import has a **flat-import fallback**

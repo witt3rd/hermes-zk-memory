@@ -101,6 +101,7 @@ class ZkMemoryProvider(MemoryProvider):
         self._root = Path(hermes_home) / "zk"
         llm = None
         provider = model = None
+        judge_cfg: dict = {}
         try:
             from hermes_cli.config import load_config_readonly
             cfg = load_config_readonly()
@@ -109,13 +110,13 @@ class ZkMemoryProvider(MemoryProvider):
             if zk_root_rel:
                 self._root = Path(hermes_home) / zk_root_rel
             aux = cfg.get("auxiliary") or {}
-            zk_judge = aux.get(_llm.TASK_KEY) or {}
-            provider = str(zk_judge.get("provider", "")).strip() or None
-            model = str(zk_judge.get("model", "")).strip() or None
+            judge_cfg = aux.get(_llm.TASK_KEY) or {}
+            provider = str(judge_cfg.get("provider", "")).strip() or None
+            model = str(judge_cfg.get("model", "")).strip() or None
         except Exception:
             pass  # fallback to default root; judge config stays unset
         if provider and model:
-            llm = _llm.build_structured_llm(provider, model)
+            llm = _llm.build_structured_llm(judge_cfg)
         else:
             # The being owns which LLM runs its write-time judgment; without an
             # explicit provider/model we do NOT inherit hermes' default routing
