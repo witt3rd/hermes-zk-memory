@@ -108,7 +108,8 @@ class ZkMemoryProvider(MemoryProvider):
             zk_root_rel = memory_cfg.get("zk_corpus_root")
             if zk_root_rel:
                 self._root = Path(hermes_home) / zk_root_rel
-            zk_judge = memory_cfg.get("zk_judge") or {}
+            aux = cfg.get("auxiliary") or {}
+            zk_judge = aux.get(_llm.TASK_KEY) or {}
             provider = str(zk_judge.get("provider", "")).strip() or None
             model = str(zk_judge.get("model", "")).strip() or None
         except Exception:
@@ -120,8 +121,9 @@ class ZkMemoryProvider(MemoryProvider):
             # explicit provider/model we do NOT inherit hermes' default routing
             # -- retain disables (corpus ops still work).
             logger.warning(
-                "zk-memory: memory.zk_judge.provider/model not configured in the "
-                "profile config; write-time retain disabled (corpus ops still work)"
+                "zk-memory: auxiliary.%s.provider/model not configured in the "
+                "profile config; write-time retain disabled (corpus ops still work)",
+                _llm.TASK_KEY,
             )
         from zk_memory import Memory as _Memory
         self._memory = _Memory(

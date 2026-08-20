@@ -1,9 +1,10 @@
-"""Config-driven write-time judge (memory.zk_judge).
+"""Config-driven write-time judge (auxiliary.zk_memory_judge).
 
 The being owns which LLM runs its write-time judgment: the provider reads
-``memory.zk_judge.provider/model`` from the profile config.yaml and binds a
-StructuredLLM to those explicit values (never inheriting hermes' default
-routing). Missing/incomplete config disables retain (llm=None), loudly.
+``auxiliary.zk_memory_judge.provider/model`` — the existing config block
+hermes manages for the plugin's auxiliary task — and binds a StructuredLLM
+to those explicit values (never inheriting hermes' default routing).
+Missing/incomplete config disables retain (llm=None), loudly.
 
 hermes_cli isn't importable standalone, so tests inject a fake
 ``hermes_cli.config`` module whose ``load_config_readonly`` returns a
@@ -31,13 +32,13 @@ def _install_fake_config(monkeypatch, cfg):
 
 
 def _with_zk_judge(cfg_dict):
-    """Config value for ``load_config_readonly`` with memory.zk_judge set."""
+    """Config value for ``load_config_readonly`` with the auxiliary block set."""
     base = {
-        "memory": {
-            "zk_judge": {"provider": "openrouter", "model": "openai/gpt-5"},
+        "auxiliary": {
+            "zk_memory_judge": {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash-0731"},
         }
     }
-    base["memory"].update(cfg_dict)
+    base["auxiliary"]["zk_memory_judge"].update(cfg_dict)
     return base
 
 
@@ -58,10 +59,10 @@ def test_build_structured_llm_threads_provider_model_to_resolution(llm_module, m
         llm_module, "_forced_tool_call",
         lambda *a, **k: {"action": "merge"},
     )
-    adapter = llm_module.build_structured_llm("openrouter", "openai/gpt-5")
+    adapter = llm_module.build_structured_llm("openrouter", "deepseek/deepseek-v4-flash-0731")
     result = adapter([{"role": "user", "content": "u"}], schema={}, name="judge")
     assert result == {"action": "merge"}
-    assert captured == {"provider": "openrouter", "model": "openai/gpt-5"}
+    assert captured == {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash-0731"}
 
 
 def test_initialize_wires_judge_from_config(plugin_module, tmp_path, monkeypatch):
@@ -80,7 +81,7 @@ def test_initialize_wires_judge_from_config(plugin_module, tmp_path, monkeypatch
     provider = plugin_module.ZkMemoryProvider()
     provider.initialize(session_id="s1", hermes_home=str(tmp_path))
 
-    assert captured == {"provider": "openrouter", "model": "openai/gpt-5"}
+    assert captured == {"provider": "openrouter", "model": "deepseek/deepseek-v4-flash-0731"}
     assert provider._memory._llm is marker
 
 
