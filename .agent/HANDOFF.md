@@ -24,9 +24,10 @@ Same split shape as `hermes-prospecta`/`prospecta`.
   `hermes_structured_llm(messages, *, schema, name)` (config-reading backward-compat wrapper),
   `_resolve_client(provider=None, model=None)`, `_forced_tool_call`. No baked provider/model —
   the being's `memory.zk_judge` config supplies them explicitly.
-- `__init__.py` `initialize()` reads `memory.zk_judge.provider/model` from the profile
-  config.yaml; missing/incomplete config disables retain (llm=None) with a clear log, never
-  falls back to a hermes default model.
+- `__init__.py` `initialize()` reads `auxiliary.zk_memory_judge.provider/model` from the
+  profile config.yaml (the block hermes manages for the auxiliary task); missing/incomplete
+  config disables retain (llm=None) with a clear log, never falls back to a hermes default
+  model.
 - Deps: `pyproject.toml` (`[lancedb]`) + `plugin.yaml` both pinned to `zk-memory @ ...@v0.4.0`.
 
 ## Version-pin history

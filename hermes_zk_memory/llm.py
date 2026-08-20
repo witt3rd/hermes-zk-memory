@@ -35,10 +35,13 @@ TASK_KEY = "zk_memory_judge"
 
 
 def _read_judge_config() -> tuple[Optional[str], Optional[str]]:
-    """Return (provider, model) from the profile's ``memory.zk_judge``.
+    """Return (provider, model) from the profile's ``auxiliary.zk_memory_judge``.
 
-    Both are required for the write-time judge to run. Never raises:
-    returns (None, None) when hermes_cli is unreachable or the block is
+    This is the existing config block hermes manages for the plugin's
+    auxiliary task (register_auxiliary_task bridges it to
+    ``AUXILIARY_ZK_MEMORY_JUDGE_*`` env vars). Both provider and model are
+    required for the write-time judge to run. Never raises: returns
+    (None, None) when hermes_cli is unreachable or the block is
     absent/incomplete.
     """
     try:
@@ -46,9 +49,10 @@ def _read_judge_config() -> tuple[Optional[str], Optional[str]]:
         cfg = load_config_readonly()
     except Exception:
         return None, None
-    zk_judge = (cfg.get("memory") or {}).get("zk_judge") or {}
-    provider = str(zk_judge.get("provider", "")).strip() or None
-    model = str(zk_judge.get("model", "")).strip() or None
+    aux = cfg.get("auxiliary") or {}
+    task_cfg = aux.get(TASK_KEY) or {}
+    provider = str(task_cfg.get("provider", "")).strip() or None
+    model = str(task_cfg.get("model", "")).strip() or None
     return provider, model
 
 
@@ -96,8 +100,9 @@ def _call_judge(
     raises."""
     if not provider or not model:
         logger.warning(
-            "zk-memory: memory.zk_judge.provider/model not configured; "
-            "retain disabled (nothing to retain)"
+            "zk-memory: auxiliary.%s.provider/model not configured; "
+            "retain disabled (nothing to retain)",
+            TASK_KEY,
         )
         return None
     client, resolved_model = _resolve_client(provider=provider, model=model)
