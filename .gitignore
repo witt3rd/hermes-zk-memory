@@ -30,3 +30,7 @@ zk/
 # OS
 .DS_Store
 Thumbs.db
+
+# agent signalling (dotagent)
+.agent/.busy/
+.agent/.dispatch.log
