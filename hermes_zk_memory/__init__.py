@@ -207,6 +207,33 @@ class ZkMemoryProvider(MemoryProvider):
                     },
                 },
                 {
+                    "name": "zk_integrate",
+                    "description": (
+                        "The careful write: place one atomic memory into the corpus so it "
+                        "integrates with what's already there. Unlike zk_write (fast, "
+                        "append-only, always a new note), zk_integrate searches the corpus "
+                        "for the right existing home and merges the content into it "
+                        "(append-only) when the merge judge finds one — or creates a new "
+                        "note when it doesn't. Use this to record a fact, update, or "
+                        "decision that should fold into an existing thread rather than "
+                        "start a duplicate note. A 'decision' kind is recorded as a dated, "
+                        "authoritative decision zettel."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "The atomic memory to integrate — the fact/update/decision, own words."},
+                            "topic": {"type": "string", "description": "What this is about, in a few words — used to search the corpus for an existing home."},
+                            "kind": {"type": "string", "enum": ["concept", "entity_update", "decision"], "description": "The kind of memory. Default concept. 'decision' records choice/alternatives/rationale as a dated decision zettel."},
+                            "title": {"type": "string", "description": "Title to use IF a new note is created."},
+                            "slug": {"type": "string", "description": "Slug to use IF a new note is created (no date prefix)."},
+                            "choice": {"type": "string", "description": "For 'decision': what was decided."},
+                            "rationale": {"type": "string", "description": "For 'decision': why the choice was made."},
+                        },
+                        "required": ["content", "topic"],
+                    },
+                },
+                {
                     "name": "zk_tend",
                     "description": (
                         "Tend the zettelkasten garden: heals moved/renamed references "
@@ -238,6 +265,8 @@ class ZkMemoryProvider(MemoryProvider):
                 result = self._read_text(args.get("ref", ""))
             elif tool_name == "zk_write":
                 result = self._write_text(args.get("slug", ""), args.get("title", ""), args.get("body", ""))
+            elif tool_name == "zk_integrate":
+                result = self._integrate_text(args)
             elif tool_name == "zk_tend":
                 result = self._tend_text(args.get("action", ""))
             else:
@@ -304,6 +333,29 @@ class ZkMemoryProvider(MemoryProvider):
         head = "ok" if result.get("ok") else "FAILED"
         out = result.get("output") or result.get("err") or ""
         return f"zk_tend {action}: {head}\n{out.strip()[:1000]}"
+
+    def _integrate_text(self, args: Dict[str, Any]) -> str:
+        content = (args.get("content") or "").strip()
+        topic = (args.get("topic") or "").strip()
+        if not content or not topic:
+            return "error: content and topic are both required"
+        assert self._memory is not None
+        kw = {
+            "content": content,
+            "topic": topic,
+            "kind": args.get("kind") or "concept",
+        }
+        for f in ("title", "slug", "choice", "rationale"):
+            v = args.get(f)
+            if v is not None and str(v).strip():
+                kw[f] = str(v).strip()
+        result = self._memory.integrate(**kw)
+        action = result.get("action")
+        if action == "merged":
+            return f"integrated into existing note: {result.get('target')}"
+        if action == "created":
+            return f"created new zettel: {result.get('path')}  uuid={result.get('uuid', '')}"
+        return f"error: {result.get('err', 'integrate failed')}"
 
     # ---- automatic motions ---------------------------------------------
 
