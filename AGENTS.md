@@ -23,8 +23,10 @@ threading, root/config resolution, auxiliary task registration).
 ## Merits (load-bearing)
 
 - **The same operations serve volitional and automatic motions** — `zk_search`/`zk_read`/
-  `zk_write`/`zk_tend` and `prefetch`/`sync_turn`/`on_pre_compress` all drive the same
-  `zk_memory` corpus ops; "auto" is an optional convenience, not a parallel code path.
+  `zk_write`/`zk_integrate`/`zk_tend` and `prefetch`/`sync_turn`/`on_pre_compress` all drive
+  the same `zk_memory` corpus ops; "auto" is an optional convenience, not a parallel code path.
+  `zk_integrate` is the careful write (merge-or-create via `Memory.integrate`), distinct from
+  the fast append-only `zk_write`.
 - **Append-only merge + collision-safe write** (owned by the library): a bad merge can at worst
   add a misplaced fragment, never destroy content.
 - **Plugin name, tool names, receipt text, corpus format, auxiliary task key, default root are a

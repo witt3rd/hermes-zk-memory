@@ -8,11 +8,11 @@ def _corpus(provider):
     return corpus
 
 
-def test_get_tool_schemas_returns_exactly_four_expected_tools(provider):
+def test_get_tool_schemas_returns_expected_tools(provider):
     schemas = provider.get_tool_schemas()
     names = {s["name"] for s in schemas}
-    assert names == {"zk_search", "zk_read", "zk_write", "zk_tend"}
-    assert len(schemas) == 4
+    assert names == {"zk_search", "zk_read", "zk_write", "zk_integrate", "zk_tend"}
+    assert len(schemas) == 5
     for s in schemas:
         assert "description" in s and s["description"]
         assert "parameters" in s
@@ -106,6 +106,64 @@ def test_handle_tool_call_zk_tend_missing_linlink(provider, monkeypatch):
     out = provider.handle_tool_call("zk_tend", {"action": "check"})
     assert "zk_tend check: FAILED" in out
     assert "linlink not on PATH" in out
+
+
+# ---------------------------------------------------------------------------
+# zk_integrate — the careful write (merge-or-create)
+# ---------------------------------------------------------------------------
+
+
+def test_handle_tool_call_zk_integrate_missing_fields(provider):
+    out = provider.handle_tool_call("zk_integrate", {"content": "x"})
+    assert out == "error: content and topic are both required"
+    out = provider.handle_tool_call("zk_integrate", {"topic": "x"})
+    assert out == "error: content and topic are both required"
+
+
+def test_handle_tool_call_zk_integrate_merges(provider, monkeypatch):
+    def fake_integrate(**kw):
+        assert kw["content"] == "Judy arriving in two weeks."
+        assert kw["topic"] == "Judy"
+        assert kw["kind"] == "entity_update"
+        return {"action": "merged", "target": "judy-uuid"}
+
+    monkeypatch.setattr(provider._memory, "integrate", fake_integrate)
+    out = provider.handle_tool_call(
+        "zk_integrate",
+        {"content": "Judy arriving in two weeks.", "topic": "Judy", "kind": "entity_update"},
+    )
+    assert out == "integrated into existing note: judy-uuid"
+
+
+def test_handle_tool_call_zk_integrate_creates(provider, monkeypatch):
+    def fake_integrate(**kw):
+        assert kw["title"] == "Rollback Decision"
+        assert kw["slug"] == "rollback-decision"
+        assert kw["choice"] == "blue-green"
+        return {"action": "created", "path": "/zk/20260101-rollback-decision.md", "uuid": "u-1"}
+
+    monkeypatch.setattr(provider._memory, "integrate", fake_integrate)
+    out = provider.handle_tool_call(
+        "zk_integrate",
+        {
+            "content": "We chose blue-green.",
+            "topic": "rollback",
+            "kind": "decision",
+            "title": "Rollback Decision",
+            "slug": "rollback-decision",
+            "choice": "blue-green",
+        },
+    )
+    assert out.startswith("created new zettel:")
+    assert "rollback-decision" in out
+
+
+def test_handle_tool_call_zk_integrate_requires_llm(provider):
+    # provider fixture has no configured judge LLM -> integrate errors
+    out = provider.handle_tool_call(
+        "zk_integrate", {"content": "x", "topic": "y"}
+    )
+    assert out.startswith("error:")
 
 
 def test_handle_tool_call_exception_path_returns_error_string(provider, monkeypatch):
