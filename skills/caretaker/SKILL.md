@@ -65,8 +65,10 @@ Version bumps are a three-step dance:
 ## House git + caretaker loop
 
 - Worktrees only (`git wt-new <branch>`); primary clone stays on `master`.
-- Orient via `.agent/HANDOFF.md`; leave the repo at the clean end-state (no stale worktrees,
-  no leftover branches, master at origin tip); write the HANDOFF on sleep.
+- Orient via the signalling handoff (`scripts/agent state` / latest `H--` event in
+  `.agent/log/`); leave the repo at the clean end-state (no stale worktrees, no leftover
+  branches, master at origin tip); write a handoff on sleep with `scripts/agent handoff
+  <subject>` — not a HANDOFF.md (retired).
 
 ## References
 
