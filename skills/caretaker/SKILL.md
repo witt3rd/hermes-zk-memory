@@ -64,7 +64,10 @@ Version bumps are a three-step dance:
 
 ## House git + caretaker loop
 
-- Worktrees only (`git wt-new <branch>`); primary clone stays on `master`.
+- House git (fleet_git, two modes): work on `master` during active iteration with
+  small, frequent, revertable commits; use worktrees (`git wt-new <branch>`) only for
+  parallel feature work. Push to a branch + PR when ready; sync with origin/master
+  before starting and before a PR.
 - Orient via the signalling handoff (`scripts/agent state` / latest `H--` event in
   `.agent/log/`); leave the repo at the clean end-state (no stale worktrees, no leftover
   branches, master at origin tip); write a handoff on sleep with `scripts/agent handoff

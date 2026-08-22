@@ -85,8 +85,14 @@ threading, root/config resolution, auxiliary task registration).
 
 ## House rules
 
-- **House git.** Primary clone stays on `master`; work happens in per-branch worktrees under
-  `hermes-zk-memory.wt/<branch>/` (`git wt-new` / `git wt-rm`). Never commit on the primary clone.
+- **House git (fleet_git, two modes).** **Mode 1 — active iteration:** work on
+  `master`, commit small, revertable batches frequently, and never accumulate
+  uncommitted work. Push to a branch + PR when a change is ready; sync with
+  origin/master before starting and before a PR. **Mode 2 — parallel feature
+  work:** use linked worktrees under `hermes-zk-memory.wt/<branch>/`
+  (`git wt-new` / `git wt-rm`). **Clean end-state:** no stale worktrees, no
+  leftover local branches beyond `master`, mainline at origin tip, primary
+  clone clean.
 - **AGENTS.md is the single source of truth.** `README.md` is a symlink to this file for GitHub;
   there is no separate human doc.
 - **Reversible-first.** Prefer changes that are easy to revert; never leave the repo worse than
